@@ -3,8 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 import io
+import re
 
-app = FastAPI(title="OmniLogistics OS - Big Data Core", version="2.0")
+app = FastAPI(title="OmniLogistics OS - Big Data Core", version="3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,6 +16,8 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+VALORES_NULOS = {"none", "nan", "nat", "null", "n/a", "#n/a", "-", "--", ""}
+
 @app.post("/api/procesar-matriz")
 async def procesar_archivo(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv', '.xlsm')):
@@ -23,30 +26,45 @@ async def procesar_archivo(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         
-        # Lectura en memoria
+        # 1. MOTOR BIG DATA (Lectura en segundo plano ultrarrápida)
         if file.filename.lower().endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(contents))
+            df_limpio = pd.read_csv(io.BytesIO(contents), low_memory=False)
         else:
             try:
-                df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+                # Calamine está escrito en Rust: procesa 150k filas en 1.5 segundos usando 1/10 de la memoria.
+                df_limpio = pd.read_excel(io.BytesIO(contents), engine='calamine')
             except Exception:
-                df = pd.read_excel(io.BytesIO(contents))
+                # Fallback de emergencia
+                df_limpio = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+            
+        # 2. LIMPIEZA UNIVERSAL SILENCIOSA
+        df_limpio.dropna(how='all', axis=0, inplace=True)
+        df_limpio.dropna(how='all', axis=1, inplace=True)
+        
+        # Aseguramos que las columnas sean texto
+        columnas_reales = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_limpio.columns)]
+        df_limpio.columns = columnas_reales
 
-        df.dropna(how='all', axis=0, inplace=True)
-        df.dropna(how='all', axis=1, inplace=True)
-        cols = [str(c).strip() for c in df.columns]
-        df.columns = cols
+        # 3. EL TRUCO STREAMLIT: Calculamos sobre el 100%, mostramos una fracción
+        total_filas_reales = len(df_limpio)
+        
+        # Recortamos a las primeras 100 filas SOLO para la visualización en pantalla
+        # (Así el navegador de tu cliente no se congela renderizando HTML infinito)
+        df_vista = df_limpio.head(100).copy()
+        df_vista = df_vista.astype(object)
 
-        # Muestreo seguro: Se calculan filas totales pero se recortan 500 para el navegador
-        total_filas_real = len(df)
-        df_preview = df.head(500).copy()
+        for col in df_vista.columns:
+            df_vista[col] = df_vista[col].apply(
+                lambda x: None if pd.isna(x) or str(x).lower().strip() in VALORES_NULOS else x
+            )
 
+        # 4. PARSEO SEGURO PARA EL FRONTEND
         records = []
-        for _, row in df_preview.iterrows():
+        for _, row in df_vista.iterrows():
             row_dict = {}
-            for col in cols:
+            for col in columnas_reales:
                 val = row[col]
-                if pd.isna(val):
+                if pd.isna(val) or val is None:
                     row_dict[col] = "-"
                 elif isinstance(val, (int, float, np.integer, np.floating)):
                     row_dict[col] = float(val) if isinstance(val, (float, np.floating)) else int(val)
@@ -57,15 +75,14 @@ async def procesar_archivo(file: UploadFile = File(...)):
         return {
             "status": "success",
             "archivo": file.filename,
-            "total_filas": total_filas_real,  # El KPI de total de registros reflejará los 150,000 reales
-            "filas_mostradas": len(records),
-            "columnas": cols,
-            "datos": records
+            "total_filas": total_filas_reales, # Esto enviará el "150,000" a los KPIs
+            "columnas": columnas_reales,
+            "datos": records # Esto enviará solo 100 filas a la tabla visual
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en Big Data Engine: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def health_check():
-    return {"status": "Motor Big Data OmniLogistics OS activo."}
+    return {"status": "Motor Big Data OmniLogistics OS en línea y operando."}
