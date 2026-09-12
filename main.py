@@ -6,10 +6,8 @@ import re
 import io
 import json
 
-# 1. DEFINICIÓN OBLIGATORIA DEL SERVIDOR (Uvicorn busca esta variable)
 app = FastAPI(title="OmniLogistics OS - Core API", version="1.0")
 
-# 2. CONFIGURACIÓN CORS PERMISIVA
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -96,7 +94,6 @@ async def procesar_archivo(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         
-        # LECTURA ADAPTATIVA UNIVERSAL (Maneja cualquier Excel/CSV)
         if file.filename.endswith('.csv'):
             df_raw = pd.read_csv(io.BytesIO(contents), header=None)
         else:
@@ -109,7 +106,6 @@ async def procesar_archivo(file: UploadFile = File(...)):
             df_limpio = extractor_logico_estricto(df_raw.copy())
             if len(df_limpio) == 0: raise ValueError("Vacío")
         except Exception:
-            # Fallback Universal para archivos estándar o de otras fincas
             if file.filename.endswith('.csv'):
                 df_limpio = pd.read_csv(io.BytesIO(contents))
             else:
@@ -122,12 +118,15 @@ async def procesar_archivo(file: UploadFile = File(...)):
             df_limpio.dropna(how='all', axis=1, inplace=True)
             df_limpio.columns = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_limpio.columns)]
 
-        for col in df_limpio.columns:
-            df_limpio[col] = df_limpio[col].apply(lambda x: None if pd.isna(x) or str(x).lower().strip() in VALORES_NULOS else x)
-        
-        df_limpio.fillna("-", inplace=True)
+        # CONVERSIÓN DE SEGURIDAD (Permite mezclar textos y números en JSON)
+        df_limpio = df_limpio.astype(object)
 
-        json_str = df_limpio.to_json(orient="records", force_ascii=False)
+        for col in df_limpio.columns:
+            df_limpio[col] = df_limpio[col].apply(
+                lambda x: None if pd.isna(x) or str(x).lower().strip() in VALORES_NULOS else x
+            )
+
+        json_str = df_limpio.to_json(orient="records", date_format="iso", default_handler=str)
         datos_json = json.loads(json_str)
         
         return {
