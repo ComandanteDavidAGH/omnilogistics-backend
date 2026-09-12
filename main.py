@@ -8,10 +8,17 @@ import json
 
 app = FastAPI(title="OmniLogistics OS - Core API", version="1.0")
 
+# Configuración explícita de orígenes permitidos
+origins = [
+    "https://omnilogistics-frontend.vercel.app",  # Tu frontend en Vercel
+    "http://localhost:3000",
+    "*"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=origins,
+    allow_credentials=False,  # Se cambia a False para evitar el bloqueo del navegador con wildcard
     allow_methods=["*"],
     allow_headers=["*"],
 )
