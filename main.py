@@ -6,8 +6,10 @@ import re
 import io
 import json
 
+# 1. INICIALIZACIÓN DEL SERVIDOR (Crucial: Define la variable 'app')
 app = FastAPI(title="OmniLogistics OS - Core API", version="1.0")
 
+# 2. CONFIGURACIÓN DE PERMISOS CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -118,7 +120,7 @@ async def procesar_archivo(file: UploadFile = File(...)):
             df_limpio.dropna(how='all', axis=1, inplace=True)
             df_limpio.columns = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_limpio.columns)]
 
-        # CONVERSIÓN DE SEGURIDAD (Permite mezclar textos y números en JSON)
+        # PREVENCION DE ERRORES DE TIPO FLOAT64 / TEXTO
         df_limpio = df_limpio.astype(object)
 
         for col in df_limpio.columns:
