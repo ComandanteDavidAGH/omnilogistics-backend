@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import re
 import io
-import traceback
+import json
 
 app = FastAPI(title="OmniLogistics OS - Core API", version="1.0")
 
@@ -90,16 +90,13 @@ def extractor_logico_estricto(df_raw: pd.DataFrame):
                 
     df_datos = df_datos[mask].reset_index(drop=True).dropna(how='all', axis=0)
 
-    # Autotipado Seguro y Conversión de NaNs a None para JSON
+    # Autotipado Seguro
     for col in df_datos.columns:
         df_datos[col] = df_datos[col].map(lambda v: None if str(v).lower().strip() in VALORES_NULOS else v)
         serie_str = df_datos[col].dropna().astype(str).str.replace(r"[$\s%]", "", regex=True).str.replace(",", ".")
         num = pd.to_numeric(serie_str, errors="coerce")
         if num.notna().sum() / max(len(serie_str), 1) > 0.5: 
             df_datos[col] = num
-
-    # Limpieza final de NaN a nivel de objeto compatible con JSON
-    df_datos = df_datos.astype(object).where(pd.notnull(df_datos), None)
 
     return df_datos
 
@@ -118,20 +115,20 @@ async def procesar_archivo(file: UploadFile = File(...)):
             
         df_limpio = extractor_logico_estricto(df_raw)
         
-        datos_json = df_limpio.to_dict(orient="records")
-        columnas = df_limpio.columns.tolist()
+        # Conversión segura via Pandas JSON (evita errores de tipos nativos de NumPy y NaN)
+        json_str = df_limpio.to_json(orient="records", date_format="iso")
+        datos_json = json.loads(json_str)
         
         return {
             "status": "success",
             "archivo": file.filename,
             "total_filas": len(df_limpio),
-            "columnas": columnas,
+            "columnas": df_limpio.columns.tolist(),
             "datos": datos_json
         }
         
     except Exception as e:
-        # Devuelve el detalle exacto del error en pantalla
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)} | Trace: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error en procesamiento: {str(e)}")
 
 @app.get("/")
 def health_check():
