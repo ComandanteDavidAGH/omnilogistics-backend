@@ -19,7 +19,6 @@ app.add_middleware(
 VALORES_NULOS = {"none", "nan", "nat", "null", "n/a", "#n/a", "-", "--", ""}
 
 def extractor_logico_estricto(df_raw: pd.DataFrame):
-    # 1. Búsqueda inteligente del inicio de tabla
     fila_eje = -1
     palabras_ancla = ['semana', 'cinta', 'categoría', 'producto', 'fecha', 'código', 'cliente']
     for i in range(min(20, len(df_raw))):
@@ -28,7 +27,6 @@ def extractor_logico_estricto(df_raw: pd.DataFrame):
             fila_eje = i
             break
 
-    # Si no encuentra las palabras clave, aborta y manda al motor Universal
     if fila_eje == -1:
         raise ValueError("No es una matriz bananera estándar")
 
@@ -98,7 +96,6 @@ async def procesar_archivo(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         
-        # Leemos en formato crudo primero
         if file.filename.lower().endswith('.csv'):
             df_raw = pd.read_csv(io.BytesIO(contents), header=None, low_memory=False)
         else:
@@ -107,12 +104,11 @@ async def procesar_archivo(file: UploadFile = File(...)):
             except Exception:
                 df_raw = pd.read_excel(io.BytesIO(contents), header=None, engine='openpyxl')
         
-        # ENRUTADOR INTELIGENTE
         try:
-            # Intento 1: Matriz Bananera
+            # Intenta procesar como matriz bananera
             df_limpio = extractor_logico_estricto(df_raw.copy())
         except Exception:
-            # Intento 2: Big Data Universal (Cualquier otra empresa)
+            # Si no es banano, aplica lectura Big Data Universal
             if file.filename.lower().endswith('.csv'):
                 df_limpio = pd.read_csv(io.BytesIO(contents), low_memory=False)
             else:
@@ -125,8 +121,10 @@ async def procesar_archivo(file: UploadFile = File(...)):
             df_limpio.dropna(how='all', axis=1, inplace=True)
             df_limpio.columns = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_limpio.columns)]
 
-        # TRUCO DE PAGINACIÓN (Calcula todo, muestra solo 100)
         total_filas_reales = len(df_limpio)
+        
+        # EL SECRETO PARA NO CONGELAR EL NAVEGADOR:
+        # Extrae solo 100 filas para enviarlas a la interfaz visual
         df_vista = df_limpio.head(100).copy()
         df_vista = df_vista.astype(object)
         columnas_reales = list(df_vista.columns)
@@ -162,4 +160,4 @@ async def procesar_archivo(file: UploadFile = File(...)):
 
 @app.get("/")
 def health_check():
-    return {"status": "Motor Big Data OmniLogistics OS en línea y operando."}
+    return {"status": "Motor Inteligente OmniLogistics OS en línea y operando."}
