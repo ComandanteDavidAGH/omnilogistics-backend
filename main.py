@@ -94,10 +94,20 @@ async def procesar_archivo(file: UploadFile = File(...)):
     
     try:
         contents = await file.read()
+        # Lectura inteligente de Excel (maneja .xlsx, .xls y múltiples hojas)
         if file.filename.endswith('.csv'):
             df_raw = pd.read_csv(io.BytesIO(contents), header=None)
         else:
-            df_raw = pd.read_excel(io.BytesIO(contents), header=None)
+            # openpyxl lee cualquier pestaña con datos automáticamente
+            excel_file = pd.ExcelFile(io.BytesIO(contents), engine='openpyxl')
+            # Toma la primera hoja que no esté vacía
+            sheet_to_use = excel_file.sheet_names[0]
+            for sheet in excel_file.sheet_names:
+                df_temp = pd.read_excel(excel_file, sheet_name=sheet, header=None)
+                if not df_temp.dropna(how='all').empty:
+                    sheet_to_use = sheet
+                    break
+            df_raw = pd.read_excel(excel_file, sheet_name=sheet_to_use, header=None)
             
         # ========================================================
         # MOTOR HÍBRIDO ADAPTATIVO
