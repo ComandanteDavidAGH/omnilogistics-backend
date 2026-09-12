@@ -69,9 +69,15 @@ def extractor_logico_estricto(df_raw: pd.DataFrame):
     
     cols_unicas, conteo = [], {}
     for col in nuevas_cols:
-        if col in conteo:
-            conteo[col] += 1
-            cols_unicas.append(f"{col} | {conteo[col]}")
+        base_col = col.strip()
+        if base_col in conteo:
+            conteo[base_col] += 1
+            # Magia: Agrega espacios en blanco al final según el número de repetidos
+            espacios = " " * conteo[base_col] 
+            cols_unicas.append(f"{base_col}{espacios}")
+        else:
+            conteo[base_col] = 0
+            cols_unicas.append(base_col)
         else:
             conteo[col] = 0
             cols_unicas.append(col)
