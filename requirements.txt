@@ -4,4 +4,4 @@ pandas
 numpy
 openpyxl
 python-multipart
-calamine
+python-calamine
