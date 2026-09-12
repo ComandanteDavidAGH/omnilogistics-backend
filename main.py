@@ -4,12 +4,9 @@ import pandas as pd
 import numpy as np
 import re
 import io
-import json
 
-# 1. INICIALIZACIÓN DEL SERVIDOR (Crucial: Define la variable 'app')
 app = FastAPI(title="OmniLogistics OS - Core API", version="1.0")
 
-# 2. CONFIGURACIÓN DE PERMISOS CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -90,13 +87,13 @@ def extractor_logico_estricto(df_raw: pd.DataFrame):
 
 @app.post("/api/procesar-matriz")
 async def procesar_archivo(file: UploadFile = File(...)):
-    if not file.filename.endswith(('.xlsx', '.xls', '.csv', '.xlsm')):
+    if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv', '.xlsm')):
         raise HTTPException(status_code=400, detail="Formato no soportado.")
     
     try:
         contents = await file.read()
         
-        if file.filename.endswith('.csv'):
+        if file.filename.lower().endswith('.csv'):
             df_raw = pd.read_csv(io.BytesIO(contents), header=None)
         else:
             try:
@@ -108,7 +105,7 @@ async def procesar_archivo(file: UploadFile = File(...)):
             df_limpio = extractor_logico_estricto(df_raw.copy())
             if len(df_limpio) == 0: raise ValueError("Vacío")
         except Exception:
-            if file.filename.endswith('.csv'):
+            if file.filename.lower().endswith('.csv'):
                 df_limpio = pd.read_csv(io.BytesIO(contents))
             else:
                 try:
@@ -120,27 +117,31 @@ async def procesar_archivo(file: UploadFile = File(...)):
             df_limpio.dropna(how='all', axis=1, inplace=True)
             df_limpio.columns = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_limpio.columns)]
 
-        # PREVENCION DE ERRORES DE TIPO FLOAT64 / TEXTO
-        df_limpio = df_limpio.astype(object)
+        # PARSER UNIVERSAL DE FILAS LIBRE DE ERRORES DE DTYPE
+        records = []
+        cols = list(df_limpio.columns)
+        for _, row in df_limpio.iterrows():
+            row_dict = {}
+            for col in cols:
+                val = row[col]
+                if pd.isna(val) or str(val).lower().strip() in VALORES_NULOS:
+                    row_dict[str(col)] = "-"
+                elif isinstance(val, (int, float, np.integer, np.floating)):
+                    row_dict[str(col)] = float(val) if isinstance(val, (float, np.floating)) else int(val)
+                else:
+                    row_dict[str(col)] = str(val).strip()
+            records.append(row_dict)
 
-        for col in df_limpio.columns:
-            df_limpio[col] = df_limpio[col].apply(
-                lambda x: None if pd.isna(x) or str(x).lower().strip() in VALORES_NULOS else x
-            )
-
-        json_str = df_limpio.to_json(orient="records", date_format="iso", default_handler=str)
-        datos_json = json.loads(json_str)
-        
         return {
             "status": "success",
             "archivo": file.filename,
-            "total_filas": len(df_limpio),
-            "columnas": df_limpio.columns.tolist(),
-            "datos": datos_json
+            "total_filas": len(records),
+            "columnas": [str(c) for c in cols],
+            "datos": records
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error en el motor: {str(e)}")
 
 @app.get("/")
 def health_check():
