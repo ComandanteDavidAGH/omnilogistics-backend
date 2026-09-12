@@ -5,8 +5,10 @@ import numpy as np
 import re
 import io
 
+# Inicialización explícita del servidor FastAPI
 app = FastAPI(title="OmniLogistics OS - Core API", version="1.0")
 
+# Permisos CORS globales
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -85,6 +87,10 @@ def extractor_logico_estricto(df_raw: pd.DataFrame):
     df_datos = df_datos[mask].reset_index(drop=True).dropna(how='all', axis=0)
     return df_datos
 
+@app.get("/")
+def health_check():
+    return {"status": "Motor OmniLogistics OS en línea y operando."}
+
 @app.post("/api/procesar-matriz")
 async def procesar_archivo(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv', '.xlsm')):
@@ -117,7 +123,6 @@ async def procesar_archivo(file: UploadFile = File(...)):
             df_limpio.dropna(how='all', axis=1, inplace=True)
             df_limpio.columns = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_limpio.columns)]
 
-        # PARSER UNIVERSAL DE FILAS LIBRE DE ERRORES DE DTYPE
         records = []
         cols = list(df_limpio.columns)
         for _, row in df_limpio.iterrows():
@@ -142,7 +147,3 @@ async def procesar_archivo(file: UploadFile = File(...)):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en el motor: {str(e)}")
-
-@app.get("/")
-def health_check():
-    return {"status": "Motor OmniLogistics OS en línea y operando."}
