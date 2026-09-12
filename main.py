@@ -4,14 +4,13 @@ import pandas as pd
 import numpy as np
 import re
 import io
+import traceback
 
-# 1. Inicializamos la aplicación FastAPI
 app = FastAPI(title="OmniLogistics OS - Core API", version="1.0")
 
-# Permitir que el Frontend (React) se comunique con este Backend sin bloqueos de seguridad
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # En producción pondremos la URL de tu Vercel
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -19,8 +18,7 @@ app.add_middleware(
 
 VALORES_NULOS = {"none", "nan", "nat", "null", "n/a", "#n/a", "-", "--", ""}
 
-# --- NUESTRO MOTOR DE ACERO (INTACTO) ---
-def extractor_logico_estricto(df_raw: pd.DataFrame, nombre_archivo: str):
+def extractor_logico_estricto(df_raw: pd.DataFrame):
     # 1. Búsqueda del Ecuador
     fila_eje = 0
     palabras_ancla = ['semana', 'cinta', 'categoría', 'producto', 'fecha', 'código', 'cliente']
@@ -33,7 +31,7 @@ def extractor_logico_estricto(df_raw: pd.DataFrame, nombre_archivo: str):
     fin_encabezados = fila_eje
     if fila_eje + 1 < len(df_raw):
         vals = [str(x).replace('.0','') for x in df_raw.iloc[fila_eje + 1] if pd.notna(x)]
-        if sum(1 for x in vals if x.isdigit() and len(x) == 4) >= 2:
+        if sum(1 for x in vals if str(x).isdigit() and len(str(x)) == 4) >= 2:
             fin_encabezados = fila_eje + 1
 
     ecuador_datos = fin_encabezados + 1
@@ -50,7 +48,7 @@ def extractor_logico_estricto(df_raw: pd.DataFrame, nombre_archivo: str):
 
     df_headers = pd.DataFrame(arr_headers).ffill(axis=0).ffill(axis=1)
 
-    # 3. Construcción del Linaje (Separado por " | " para que el FrontEnd lo dibuje como quiera)
+    # 3. Construcción del Linaje
     nuevas_cols = []
     for col_idx in range(len(df_headers.columns)):
         jerarquia = []
@@ -66,8 +64,7 @@ def extractor_logico_estricto(df_raw: pd.DataFrame, nombre_archivo: str):
                         jerarquia.append(texto_format)
         
         if not jerarquia: jerarquia = [f"Columna_{col_idx}"]
-        nombre_final = " | ".join(jerarquia) # Usamos Pipe para el JSON
-        nuevas_cols.append(nombre_final)
+        nuevas_cols.append(" | ".join(jerarquia))
 
     df_datos = df_raw.iloc[ecuador_datos:].copy()
     
@@ -93,28 +90,25 @@ def extractor_logico_estricto(df_raw: pd.DataFrame, nombre_archivo: str):
                 
     df_datos = df_datos[mask].reset_index(drop=True).dropna(how='all', axis=0)
 
-    # Autotipado Seguro (Manejo de NaN para JSON)
+    # Autotipado Seguro y Conversión de NaNs a None para JSON
     for col in df_datos.columns:
         df_datos[col] = df_datos[col].map(lambda v: None if str(v).lower().strip() in VALORES_NULOS else v)
         serie_str = df_datos[col].dropna().astype(str).str.replace(r"[$\s%]", "", regex=True).str.replace(",", ".")
         num = pd.to_numeric(serie_str, errors="coerce")
         if num.notna().sum() / max(len(serie_str), 1) > 0.5: 
-            # Reemplazamos NaN de numpy por None nativo de Python para que el JSON no falle
-            df_datos[col] = num.replace({np.nan: None})
+            df_datos[col] = num
+
+    # Limpieza final de NaN a nivel de objeto compatible con JSON
+    df_datos = df_datos.astype(object).where(pd.notnull(df_datos), None)
 
     return df_datos
 
-# --- LA PUERTA DE ENTRADA (ENDPOINT) ---
 @app.post("/api/procesar-matriz")
 async def procesar_archivo(file: UploadFile = File(...)):
-    """
-    Recibe un archivo Excel/CSV, lo procesa con el motor B2B y devuelve un JSON puro.
-    """
     if not file.filename.endswith(('.xlsx', '.xls', '.csv')):
         raise HTTPException(status_code=400, detail="Formato no soportado. Sube un Excel o CSV.")
     
     try:
-        # Leemos el archivo desde la memoria de internet
         contents = await file.read()
         
         if file.filename.endswith('.csv'):
@@ -122,10 +116,8 @@ async def procesar_archivo(file: UploadFile = File(...)):
         else:
             df_raw = pd.read_excel(io.BytesIO(contents), header=None)
             
-        # Pasamos por el motor
-        df_limpio = extractor_logico_estricto(df_raw, file.filename)
+        df_limpio = extractor_logico_estricto(df_raw)
         
-        # Convertimos la matriz de pandas a un diccionario (JSON) universal
         datos_json = df_limpio.to_dict(orient="records")
         columnas = df_limpio.columns.tolist()
         
@@ -138,9 +130,9 @@ async def procesar_archivo(file: UploadFile = File(...)):
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error procesando la matriz: {str(e)}")
+        # Devuelve el detalle exacto del error en pantalla
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)} | Trace: {traceback.format_exc()}")
 
-# Ruta de prueba de salud
 @app.get("/")
 def health_check():
     return {"status": "Motor OmniLogistics OS en línea y operando."}
