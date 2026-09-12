@@ -6,8 +6,10 @@ import re
 import io
 import json
 
+# 1. DEFINICIÓN OBLIGATORIA DEL SERVIDOR (Uvicorn busca esta variable)
 app = FastAPI(title="OmniLogistics OS - Core API", version="1.0")
 
+# 2. CONFIGURACIÓN CORS PERMISIVA
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,7 +22,6 @@ app.add_middleware(
 VALORES_NULOS = {"none", "nan", "nat", "null", "n/a", "#n/a", "-", "--", ""}
 
 def extractor_logico_estricto(df_raw: pd.DataFrame):
-    # Intentará buscar el formato Banano
     fila_eje = 0
     palabras_ancla = ['semana', 'cinta', 'categoría', 'producto', 'fecha', 'código', 'cliente']
     for i in range(min(20, len(df_raw))):
@@ -94,46 +95,36 @@ async def procesar_archivo(file: UploadFile = File(...)):
     
     try:
         contents = await file.read()
-        # Lectura inteligente de Excel (maneja .xlsx, .xls y múltiples hojas)
+        
+        # LECTURA ADAPTATIVA UNIVERSAL (Maneja cualquier Excel/CSV)
         if file.filename.endswith('.csv'):
             df_raw = pd.read_csv(io.BytesIO(contents), header=None)
         else:
-            # openpyxl lee cualquier pestaña con datos automáticamente
-            excel_file = pd.ExcelFile(io.BytesIO(contents), engine='openpyxl')
-            # Toma la primera hoja que no esté vacía
-            sheet_to_use = excel_file.sheet_names[0]
-            for sheet in excel_file.sheet_names:
-                df_temp = pd.read_excel(excel_file, sheet_name=sheet, header=None)
-                if not df_temp.dropna(how='all').empty:
-                    sheet_to_use = sheet
-                    break
-            df_raw = pd.read_excel(excel_file, sheet_name=sheet_to_use, header=None)
+            try:
+                df_raw = pd.read_excel(io.BytesIO(contents), header=None, engine='openpyxl')
+            except Exception:
+                df_raw = pd.read_excel(io.BytesIO(contents), header=None)
             
-        # ========================================================
-        # MOTOR HÍBRIDO ADAPTATIVO
-        # ========================================================
         try:
-            # 1. Intenta limpieza experta de Banano
             df_limpio = extractor_logico_estricto(df_raw.copy())
             if len(df_limpio) == 0: raise ValueError("Vacío")
         except Exception:
-            # 2. Si falla o es otro archivo, usa el Limpiador Universal
+            # Fallback Universal para archivos estándar o de otras fincas
             if file.filename.endswith('.csv'):
                 df_limpio = pd.read_csv(io.BytesIO(contents))
             else:
-                df_limpio = pd.read_excel(io.BytesIO(contents))
+                try:
+                    df_limpio = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+                except Exception:
+                    df_limpio = pd.read_excel(io.BytesIO(contents))
             
-            # Limpieza brutal de filas y columnas que estén 100% vacías
             df_limpio.dropna(how='all', axis=0, inplace=True)
             df_limpio.dropna(how='all', axis=1, inplace=True)
-            # Nombrar columnas vacías y convertir encabezados a texto
             df_limpio.columns = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_limpio.columns)]
 
-        # 3. Blindaje Universal de datos para evitar que JSON explote
         for col in df_limpio.columns:
             df_limpio[col] = df_limpio[col].apply(lambda x: None if pd.isna(x) or str(x).lower().strip() in VALORES_NULOS else x)
         
-        # Rellenar nulos con guiones para enviar texto limpio al frontend
         df_limpio.fillna("-", inplace=True)
 
         json_str = df_limpio.to_json(orient="records", force_ascii=False)
@@ -148,5 +139,8 @@ async def procesar_archivo(file: UploadFile = File(...)):
         }
         
     except Exception as e:
-        # Si todo falla, enviamos el error real al frontend, no un error mudo.
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/")
+def health_check():
+    return {"status": "Motor OmniLogistics OS en línea y operando."}
