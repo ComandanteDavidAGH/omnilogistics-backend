@@ -47,7 +47,6 @@ def evaluar_calidad_datos(df, columnas_mapeadas):
     if total_filas == 0:
         return 0, "NULA", {}
 
-    # A. UNICIDAD (Detectar viajes duplicados)
     col_viaje = columnas_mapeadas.get("VIAJE_ID")
     if col_viaje:
         viajes_unicos = df[col_viaje].nunique()
@@ -55,28 +54,22 @@ def evaluar_calidad_datos(df, columnas_mapeadas):
     else:
         unicidad = 0.0
 
-    # B. COMPLETITUD (Detectar vacíos en métricas vitales)
     cols_criticas = [columnas_mapeadas.get(k) for k in ["KM", "LITROS", "INGRESO", "COSTO"] if columnas_mapeadas.get(k)]
     if cols_criticas:
         celdas_totales = total_filas * len(cols_criticas)
-        # Cuenta cuántas celdas NO son nulas o cero cuando no deberían
         celdas_llenas = df[cols_criticas].replace([0, '0', '', ' '], np.nan).notna().sum().sum()
         completitud = (celdas_llenas / celdas_totales) * 100
     else:
         completitud = 0.0
 
-    # C. VALIDEZ NUMÉRICA (Consistencia de tipos de datos)
-    # Si las columnas de dinero tienen letras, penalizamos
     validez = 100.0
     col_ingreso = columnas_mapeadas.get("INGRESO")
     if col_ingreso:
         no_numericos = pd.to_numeric(df[col_ingreso], errors='coerce').isna().sum()
         validez = ((total_filas - no_numericos) / total_filas) * 100
 
-    # SCORE GLOBAL (Ponderado: Completitud pesa más)
     score_global = (unicidad * 0.3) + (completitud * 0.5) + (validez * 0.2)
     
-    # NIVEL DE CONFIANZA
     if score_global >= 90:
         confianza = "ALTA"
     elif score_global >= 70:
@@ -108,7 +101,6 @@ async def procesar_archivo(file: UploadFile = File(...)):
 
         df_viajes = sheet_viajes.copy()
         
-        # Mapeo Semántico
         columnas_mapeadas = {
             "VIAJE_ID": find_col(df_viajes, "VIAJE_ID"),
             "VEHICULO": find_col(df_viajes, "VEHICULO"),
@@ -121,7 +113,6 @@ async def procesar_archivo(file: UploadFile = File(...)):
             "OTROS_COSTOS": find_col(df_viajes, "OTROS_COSTOS")
         }
 
-        # ⚡ EJECUCIÓN DEL DATA QUALITY GATE ANTES DEL ANÁLISIS
         score_dq, nivel_confianza, metricas_dq = evaluar_calidad_datos(df_viajes, columnas_mapeadas)
         
         facturas_dict = {}
@@ -137,19 +128,20 @@ async def procesar_archivo(file: UploadFile = File(...)):
         total_costos = 0
         dinero_en_riesgo = 0
         hallazgos = []
-# ⚡ RADAR DE CLONES (Pre-procesamiento)
+
+        # ⚡ RADAR DE CLONES (Integrado correctamente)
         col_viaje = columnas_mapeadas["VIAJE_ID"]
         viajes_duplicados = set()
         if col_viaje:
             df_dups = df_viajes[df_viajes.duplicated(subset=[col_viaje], keep=False)]
             viajes_duplicados = set(df_dups[col_viaje].dropna().astype(str))
-        viajes_reportados = set() # Para no escupir la alerta 5 veces si se clonó 5 veces
+        viajes_reportados = set() 
+
         # Motor Económico
         for index, row in df_viajes.iterrows():
             viaje_id = str(row[columnas_mapeadas["VIAJE_ID"]]) if columnas_mapeadas["VIAJE_ID"] and pd.notna(row[columnas_mapeadas["VIAJE_ID"]]) else f"Fila {index+1}"
             vehiculo = str(row[columnas_mapeadas["VEHICULO"]]) if columnas_mapeadas["VEHICULO"] and pd.notna(row[columnas_mapeadas["VEHICULO"]]) else "N/A"
             
-            # Limpieza rápida de datos al vuelo (por si la validez falló)
             try: ingreso = float(row[columnas_mapeadas["INGRESO"]]) if columnas_mapeadas["INGRESO"] and pd.notna(row[columnas_mapeadas["INGRESO"]]) else 0
             except: ingreso = 0
             try: costo = float(row[columnas_mapeadas["COSTO"]]) if columnas_mapeadas["COSTO"] and pd.notna(row[columnas_mapeadas["COSTO"]]) else 0
@@ -168,6 +160,7 @@ async def procesar_archivo(file: UploadFile = File(...)):
             total_ingresos += ingreso
             total_costos += costo
 
+            # REGLA 1: MARGEN DESTRUIDO
             if margen_pct <= 0:
                 impacto = abs(margen)
                 dinero_en_riesgo += impacto
@@ -182,6 +175,7 @@ async def procesar_archivo(file: UploadFile = File(...)):
                     "accion": "Auditar costos extraordinarios y retener liquidación."
                 })
 
+            # REGLA 2: HUACHICOL
             if km > 0 and litros > 0:
                 rendimiento_real = km / litros
                 rendimiento_esperado = 2.6
@@ -200,6 +194,7 @@ async def procesar_archivo(file: UploadFile = File(...)):
                         "accion": "Cruzar carga de diésel con telemetría GPS del motor."
                     })
 
+            # REGLA 3: FRAUDE DE FACTURACION
             if sheet_facturacion is not None and viaje_id in facturas_dict:
                 try: ingreso_facturado = float(facturas_dict[viaje_id]) if pd.notna(facturas_dict[viaje_id]) else 0
                 except: ingreso_facturado = 0
@@ -218,10 +213,25 @@ async def procesar_archivo(file: UploadFile = File(...)):
                         "accion": "Detener pago a proveedores de este viaje hasta cuadrar factura con el cliente."
                     })
 
+            # ⚡ REGLA 4: DETECCIÓN DE CLONES (El que faltaba)
+            if col_viaje and viaje_id in viajes_duplicados and viaje_id not in viajes_reportados:
+                viajes_reportados.add(viaje_id)
+                impacto_clon = costo 
+                dinero_en_riesgo += impacto_clon
+                hallazgos.append({
+                    "id": f"F4-{viaje_id}",
+                    "prioridad": 1,
+                    "tipo": "CLONACION_DETECTADA",
+                    "titulo": f"Alerta de Clonación - Viaje {viaje_id}",
+                    "causa": f"Registro duplicado detectado. Riesgo inminente de pago doble o doble liquidación.",
+                    "impacto": impacto_clon,
+                    "vehiculo": vehiculo,
+                    "accion": "Bloquear liquidación en el ERP y eliminar la fila clonada inmediatamente."
+                })
+
         hallazgos = sorted(hallazgos, key=lambda x: x['impacto'], reverse=True)
         margen_global = ((total_ingresos - total_costos) / total_ingresos * 100) if total_ingresos > 0 else 0
 
-        # EL OBJETO DEFINITIVO
         return {
             "status": "success",
             "calidad_datos": {
