@@ -3,9 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
 import io
-import re
 
-app = FastAPI(title="OmniLogistics OS - Smart Core", version="4.0")
+app = FastAPI(title="GENESIS OMNI CORE", version="0.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -13,157 +12,170 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
-VALORES_NULOS = {"none", "nan", "nat", "null", "n/a", "#n/a", "-", "--", ""}
+# ==========================================
+# 1. DICCIONARIO SEMÁNTICO (Semantic Mapper)
+# ==========================================
+SEMANTIC_DICT = {
+    "VIAJE_ID": ["viaje", "id", "orden", "ticket"],
+    "VEHICULO": ["vehiculo", "unidad", "tracto", "placa", "camion"],
+    "INGRESO": ["ingreso", "venta", "flete", "facturado"],
+    "COSTO": ["costo_total", "costo", "gastos"],
+    "MARGEN": ["margen"],
+    "MARGEN_PCT": ["margen_%", "margen %", "rentabilidad"],
+    "KM": ["km", "kilometros", "recorrido"],
+    "LITROS": ["litros", "combustible", "diesel", "galones"],
+    "PRECIO_DIESEL": ["precio_diesel", "precio"],
+    "OTROS_COSTOS": ["otros_costos", "extra", "maniobras"]
+}
 
-def extractor_logico_estricto(df_raw: pd.DataFrame):
-    fila_eje = -1
-    palabras_ancla = ['semana', 'cinta', 'categoría', 'producto', 'fecha', 'código', 'cliente']
-    for i in range(min(20, len(df_raw))):
-        text_row = " ".join([str(x).lower() for x in df_raw.iloc[i] if pd.notna(x)])
-        if any(w in text_row for w in palabras_ancla):
-            fila_eje = i
-            break
-
-    if fila_eje == -1:
-        raise ValueError("No es una matriz bananera estándar")
-
-    fin_encabezados = fila_eje
-    if fila_eje + 1 < len(df_raw):
-        vals = [str(x).replace('.0','') for x in df_raw.iloc[fila_eje + 1] if pd.notna(x)]
-        if sum(1 for x in vals if str(x).isdigit() and len(str(x)) == 4) >= 2:
-            fin_encabezados = fila_eje + 1
-
-    ecuador_datos = fin_encabezados + 1
-    inicio_encabezados = max(0, fila_eje - 2) 
-    
-    arr_headers = df_raw.iloc[inicio_encabezados:fin_encabezados + 1].to_numpy(dtype=object)
-    rows, cols = arr_headers.shape
-    for r in range(rows):
-        for c in range(cols):
-            val_str = str(arr_headers[r, c]).strip() if arr_headers[r, c] is not None else ""
-            if len(val_str) > 40:
-                arr_headers[r, c] = np.nan
-
-    df_headers = pd.DataFrame(arr_headers).ffill(axis=0).ffill(axis=1)
-
-    nuevas_cols = []
-    for col_idx in range(len(df_headers.columns)):
-        jerarquia = []
-        for f_idx in range(len(df_headers)):
-            val = df_headers.iloc[f_idx, col_idx]
-            if pd.notna(val) and str(val).strip() != "" and str(val).lower() != 'nan':
-                texto = str(val).replace('.0', '').strip()
-                texto = re.sub(r'\b20\d{2}(?:\s*-\s*20\d{2})+\b', '', texto).strip('- ')
-                texto_format = " ".join(texto.split()).title() if not texto.isdigit() else " ".join(texto.split())
-                if texto_format:
-                    if not jerarquia or jerarquia[-1].lower() != texto_format.lower():
-                        jerarquia.append(texto_format)
-        
-        if not jerarquia: jerarquia = [f"Columna_{col_idx}"]
-        nuevas_cols.append(" | ".join(jerarquia))
-
-    df_datos = df_raw.iloc[ecuador_datos:].copy()
-    
-    cols_unicas, conteo = [], {}
-    for col in nuevas_cols:
-        base_col = col.strip()
-        if base_col in conteo:
-            conteo[base_col] += 1
-            # Magia: Agrega espacios en blanco al final según el número de repetidos
-            espacios = " " * conteo[base_col] 
-            cols_unicas.append(f"{base_col}{espacios}")
-        else:
-            conteo[base_col] = 0
-            cols_unicas.append(base_col)
-        else:
-            conteo[col] = 0
-            cols_unicas.append(col)
-            
-    df_datos.columns = cols_unicas
-    
-    mask = pd.Series([True] * len(df_datos), index=df_datos.index)
-    if not df_datos.empty and len(df_datos.columns) > 0:
-        for col in df_datos.columns[:3]:
-            if df_datos[col].dtype == 'object':
-                filtro = df_datos[col].astype(str).str.lower().str.contains(r'total|promedio|acumulado|año\b|ano\b|sem\b|sem\d', regex=True, na=False)
-                mask = mask & (~filtro)
-                
-    df_datos = df_datos[mask].reset_index(drop=True).dropna(how='all', axis=0)
-    return df_datos
+def find_col(df, semantic_key):
+    """Busca la columna en el Excel sin importar cómo la escriba el cliente."""
+    aliases = SEMANTIC_DICT.get(semantic_key, [])
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+        for alias in aliases:
+            if alias in col_lower:
+                return col
+    return None
 
 @app.post("/api/procesar-matriz")
 async def procesar_archivo(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv', '.xlsm')):
-        raise HTTPException(status_code=400, detail="Formato no soportado.")
+    if not file.filename.lower().endswith(('.xlsx', '.xls', '.xlsm')):
+        raise HTTPException(status_code=400, detail="GENESIS v0.2 requiere un archivo Excel multipestaña.")
     
     try:
         contents = await file.read()
+        xls = pd.ExcelFile(io.BytesIO(contents))
         
-        if file.filename.lower().endswith('.csv'):
-            df_raw = pd.read_csv(io.BytesIO(contents), header=None, low_memory=False)
-        else:
-            try:
-                df_raw = pd.read_excel(io.BytesIO(contents), header=None, engine='calamine')
-            except Exception:
-                df_raw = pd.read_excel(io.BytesIO(contents), header=None, engine='openpyxl')
+        # 2. INGESTA OMNI: Cargar todas las pestañas al mismo tiempo
+        sheets = {sheet.lower().strip(): pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names}
         
-        try:
-            # Intenta procesar como matriz bananera
-            df_limpio = extractor_logico_estricto(df_raw.copy())
-        except Exception:
-            # Si no es banano, aplica lectura Big Data Universal
-            if file.filename.lower().endswith('.csv'):
-                df_limpio = pd.read_csv(io.BytesIO(contents), low_memory=False)
-            else:
-                try:
-                    df_limpio = pd.read_excel(io.BytesIO(contents), engine='calamine')
-                except Exception:
-                    df_limpio = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+        # Detectar hojas clave
+        sheet_viajes = next((sheets[k] for k in sheets.keys() if "viaje" in k or "operacion" in k), None)
+        sheet_facturacion = next((sheets[k] for k in sheets.keys() if "factura" in k or "ingreso" in k), None)
+        
+        if sheet_viajes is None:
+            raise HTTPException(status_code=400, detail="GENESIS requiere una pestaña llamada 'Viajes' u 'Operaciones'.")
+
+        df_viajes = sheet_viajes.copy()
+        
+        # 3. MAPEADO SEMÁNTICO EN ACCIÓN
+        col_viaje = find_col(df_viajes, "VIAJE_ID")
+        col_vehiculo = find_col(df_viajes, "VEHICULO")
+        col_ingreso = find_col(df_viajes, "INGRESO")
+        col_costo = find_col(df_viajes, "COSTO")
+        col_margen = find_col(df_viajes, "MARGEN")
+        col_margen_pct = find_col(df_viajes, "MARGEN_PCT")
+        col_km = find_col(df_viajes, "KM")
+        col_litros = find_col(df_viajes, "LITROS")
+        col_otros_costos = find_col(df_viajes, "OTROS_COSTOS")
+        
+        # 4. MEMORIA CRUZADA: Cargar facturación para auditar fraudes
+        facturas_dict = {}
+        if sheet_facturacion is not None:
+            col_fact_viaje = find_col(sheet_facturacion, "VIAJE_ID")
+            col_fact_ingreso = find_col(sheet_facturacion, "INGRESO")
+            if col_fact_viaje and col_fact_ingreso:
+                for _, r in sheet_facturacion.iterrows():
+                    v_id = str(r[col_fact_viaje]).strip()
+                    facturas_dict[v_id] = r[col_fact_ingreso]
+
+        total_ingresos = 0
+        total_costos = 0
+        dinero_en_riesgo = 0
+        hallazgos = []
+
+        # 5. EL MOTOR ECONÓMICO Y DE REGLAS (Ejecutándose en el Backend)
+        for index, row in df_viajes.iterrows():
+            viaje_id = str(row[col_viaje]) if col_viaje and pd.notna(row[col_viaje]) else f"Fila {index+1}"
+            vehiculo = str(row[col_vehiculo]) if col_vehiculo and pd.notna(row[col_vehiculo]) else "N/A"
             
-            df_limpio.dropna(how='all', axis=0, inplace=True)
-            df_limpio.dropna(how='all', axis=1, inplace=True)
-            df_limpio.columns = [str(c).strip() if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_limpio.columns)]
+            ingreso = float(row[col_ingreso]) if col_ingreso and pd.notna(row[col_ingreso]) else 0
+            costo = float(row[col_costo]) if col_costo and pd.notna(row[col_costo]) else 0
+            margen = float(row[col_margen]) if col_margen and pd.notna(row[col_margen]) else (ingreso - costo)
+            margen_pct = float(row[col_margen_pct]) if col_margen_pct and pd.notna(row[col_margen_pct]) else ((margen / ingreso * 100) if ingreso > 0 else 0)
+            
+            km = float(row[col_km]) if col_km and pd.notna(row[col_km]) else 0
+            litros = float(row[col_litros]) if col_litros and pd.notna(row[col_litros]) else 0
+            otros_costos = float(row[col_otros_costos]) if col_otros_costos and pd.notna(row[col_otros_costos]) else 0
 
-        total_filas_reales = len(df_limpio)
-        
-        # EL SECRETO PARA NO CONGELAR EL NAVEGADOR:
-        # Extrae solo 100 filas para enviarlas a la interfaz visual
-        df_vista = df_limpio.head(100).copy()
-        df_vista = df_vista.astype(object)
-        columnas_reales = list(df_vista.columns)
+            total_ingresos += ingreso
+            total_costos += costo
 
-        for col in columnas_reales:
-            df_vista[col] = df_vista[col].apply(
-                lambda x: None if pd.isna(x) or str(x).lower().strip() in VALORES_NULOS else x
-            )
+            # REGLA 1: MARGEN DESTRUIDO
+            if margen_pct <= 0:
+                impacto = abs(margen)
+                dinero_en_riesgo += impacto
+                hallazgos.append({
+                    "id": f"F1-{viaje_id}",
+                    "prioridad": 1,
+                    "tipo": "MARGEN_CRITICO",
+                    "titulo": f"Pérdida Operativa - Viaje {viaje_id}",
+                    "causa": f"Costos extraordinarios anómalos (${otros_costos:,.2f})" if otros_costos > 1000 else "El costo total superó los ingresos.",
+                    "impacto": impacto,
+                    "vehiculo": vehiculo,
+                    "accion": "Auditar costos extraordinarios y retener liquidación."
+                })
 
-        records = []
-        for _, row in df_vista.iterrows():
-            row_dict = {}
-            for col in columnas_reales:
-                val = row[col]
-                if pd.isna(val) or val is None:
-                    row_dict[col] = "-"
-                elif isinstance(val, (int, float, np.integer, np.floating)):
-                    row_dict[col] = float(val) if isinstance(val, (float, np.floating)) else int(val)
-                else:
-                    row_dict[col] = str(val).strip()
-            records.append(row_dict)
+            # REGLA 2: RENDIMIENTO / HUACHICOL
+            if km > 0 and litros > 0:
+                rendimiento_real = km / litros
+                rendimiento_esperado = 2.6
+                if rendimiento_real < 2.25:
+                    litros_desperdiciados = litros - (km / rendimiento_esperado)
+                    impacto_comb = litros_desperdiciados * 25.0 
+                    dinero_en_riesgo += impacto_comb
+                    hallazgos.append({
+                        "id": f"F2-{viaje_id}",
+                        "prioridad": 2,
+                        "tipo": "FUGA_COMBUSTIBLE",
+                        "titulo": f"Consumo Anormal - Viaje {viaje_id}",
+                        "causa": f"Rendimiento de {rendimiento_real:.2f} km/L vs {rendimiento_esperado} esperado.",
+                        "impacto": impacto_comb,
+                        "vehiculo": vehiculo,
+                        "accion": "Cruzar carga de diésel con telemetría GPS del motor."
+                    })
 
+            # REGLA 3: FRAUDE CRUZADO (Operaciones vs Facturación)
+            if sheet_facturacion is not None and viaje_id in facturas_dict:
+                ingreso_facturado = float(facturas_dict[viaje_id]) if pd.notna(facturas_dict[viaje_id]) else 0
+                if ingreso_facturado < ingreso and (ingreso - ingreso_facturado) > 10:
+                    impacto_fact = ingreso - ingreso_facturado
+                    dinero_en_riesgo += impacto_fact
+                    hallazgos.append({
+                        "id": f"F3-{viaje_id}",
+                        "prioridad": 1,
+                        "tipo": "FRAUDE_FACTURACION",
+                        "titulo": f"Servicio No Cobrado - Viaje {viaje_id}",
+                        "causa": f"Tráfico reporta un cobro de ${ingreso:,.2f} pero Finanzas solo facturó ${ingreso_facturado:,.2f}.",
+                        "impacto": impacto_fact,
+                        "vehiculo": vehiculo,
+                        "accion": "Detener pago a proveedores de este viaje hasta cuadrar factura con el cliente."
+                    })
+
+        # Ordenar hallazgos de mayor a menor impacto (El Radar)
+        hallazgos = sorted(hallazgos, key=lambda x: x['impacto'], reverse=True)
+        margen_global = ((total_ingresos - total_costos) / total_ingresos * 100) if total_ingresos > 0 else 0
+
+        # Respuesta final empaquetada con Inteligencia
         return {
             "status": "success",
-            "archivo": file.filename,
-            "total_filas": total_filas_reales, 
-            "columnas": columnas_reales,
-            "datos": records
+            "analisis": {
+                "totalIngresos": total_ingresos,
+                "totalCostos": total_costos,
+                "margenGlobal": margen_global,
+                "dineroEnRiesgo": dinero_en_riesgo,
+                "totalHallazgos": len(hallazgos),
+                "filasAnalizadas": len(df_viajes)
+            },
+            "hallazgos": hallazgos[:10] # Top 10
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def health_check():
-    return {"status": "Motor Inteligente OmniLogistics OS en línea y operando."}
+    return {"status": "Motor Inteligente GENESIS CORE v0.2 en línea y operando."}
