@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import io
 
-app = FastAPI(title="GENESIS OMNI CORE", version="0.2")
+app = FastAPI(title="GENESIS OMNI CORE", version="0.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,7 +15,7 @@ app.add_middleware(
 )
 
 # ==========================================
-# 1. DICCIONARIO SEMÁNTICO (Semantic Mapper)
+# 1. DICCIONARIO SEMÁNTICO
 # ==========================================
 SEMANTIC_DICT = {
     "VIAJE_ID": ["viaje", "id", "orden", "ticket"],
@@ -31,7 +31,6 @@ SEMANTIC_DICT = {
 }
 
 def find_col(df, semantic_key):
-    """Busca la columna en el Excel sin importar cómo la escriba el cliente."""
     aliases = SEMANTIC_DICT.get(semantic_key, [])
     for col in df.columns:
         col_lower = str(col).lower().strip()
@@ -40,19 +39,67 @@ def find_col(df, semantic_key):
                 return col
     return None
 
+# ==========================================
+# 2. DATA QUALITY GATE (NUEVO MOTOR)
+# ==========================================
+def evaluar_calidad_datos(df, columnas_mapeadas):
+    total_filas = len(df)
+    if total_filas == 0:
+        return 0, "NULA", {}
+
+    # A. UNICIDAD (Detectar viajes duplicados)
+    col_viaje = columnas_mapeadas.get("VIAJE_ID")
+    if col_viaje:
+        viajes_unicos = df[col_viaje].nunique()
+        unicidad = (viajes_unicos / total_filas) * 100
+    else:
+        unicidad = 0.0
+
+    # B. COMPLETITUD (Detectar vacíos en métricas vitales)
+    cols_criticas = [columnas_mapeadas.get(k) for k in ["KM", "LITROS", "INGRESO", "COSTO"] if columnas_mapeadas.get(k)]
+    if cols_criticas:
+        celdas_totales = total_filas * len(cols_criticas)
+        # Cuenta cuántas celdas NO son nulas o cero cuando no deberían
+        celdas_llenas = df[cols_criticas].replace([0, '0', '', ' '], np.nan).notna().sum().sum()
+        completitud = (celdas_llenas / celdas_totales) * 100
+    else:
+        completitud = 0.0
+
+    # C. VALIDEZ NUMÉRICA (Consistencia de tipos de datos)
+    # Si las columnas de dinero tienen letras, penalizamos
+    validez = 100.0
+    col_ingreso = columnas_mapeadas.get("INGRESO")
+    if col_ingreso:
+        no_numericos = pd.to_numeric(df[col_ingreso], errors='coerce').isna().sum()
+        validez = ((total_filas - no_numericos) / total_filas) * 100
+
+    # SCORE GLOBAL (Ponderado: Completitud pesa más)
+    score_global = (unicidad * 0.3) + (completitud * 0.5) + (validez * 0.2)
+    
+    # NIVEL DE CONFIANZA
+    if score_global >= 90:
+        confianza = "ALTA"
+    elif score_global >= 70:
+        confianza = "MEDIA"
+    else:
+        confianza = "BAJA - CUIDADO"
+
+    return round(score_global, 1), confianza, {
+        "unicidad": round(unicidad, 1),
+        "completitud": round(completitud, 1),
+        "validez": round(validez, 1)
+    }
+
 @app.post("/api/procesar-matriz")
 async def procesar_archivo(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(('.xlsx', '.xls', '.xlsm')):
-        raise HTTPException(status_code=400, detail="GENESIS v0.2 requiere un archivo Excel multipestaña.")
+        raise HTTPException(status_code=400, detail="GENESIS v0.3 requiere un archivo Excel.")
     
     try:
         contents = await file.read()
         xls = pd.ExcelFile(io.BytesIO(contents))
-        
-        # 2. INGESTA OMNI: Cargar todas las pestañas al mismo tiempo
         sheets = {sheet.lower().strip(): pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names}
         
-        # Detectar hojas clave
         sheet_viajes = next((sheets[k] for k in sheets.keys() if "viaje" in k or "operacion" in k), None)
         sheet_facturacion = next((sheets[k] for k in sheets.keys() if "factura" in k or "ingreso" in k), None)
         
@@ -61,18 +108,22 @@ async def procesar_archivo(file: UploadFile = File(...)):
 
         df_viajes = sheet_viajes.copy()
         
-        # 3. MAPEADO SEMÁNTICO EN ACCIÓN
-        col_viaje = find_col(df_viajes, "VIAJE_ID")
-        col_vehiculo = find_col(df_viajes, "VEHICULO")
-        col_ingreso = find_col(df_viajes, "INGRESO")
-        col_costo = find_col(df_viajes, "COSTO")
-        col_margen = find_col(df_viajes, "MARGEN")
-        col_margen_pct = find_col(df_viajes, "MARGEN_PCT")
-        col_km = find_col(df_viajes, "KM")
-        col_litros = find_col(df_viajes, "LITROS")
-        col_otros_costos = find_col(df_viajes, "OTROS_COSTOS")
+        # Mapeo Semántico
+        columnas_mapeadas = {
+            "VIAJE_ID": find_col(df_viajes, "VIAJE_ID"),
+            "VEHICULO": find_col(df_viajes, "VEHICULO"),
+            "INGRESO": find_col(df_viajes, "INGRESO"),
+            "COSTO": find_col(df_viajes, "COSTO"),
+            "MARGEN": find_col(df_viajes, "MARGEN"),
+            "MARGEN_PCT": find_col(df_viajes, "MARGEN_PCT"),
+            "KM": find_col(df_viajes, "KM"),
+            "LITROS": find_col(df_viajes, "LITROS"),
+            "OTROS_COSTOS": find_col(df_viajes, "OTROS_COSTOS")
+        }
+
+        # ⚡ EJECUCIÓN DEL DATA QUALITY GATE ANTES DEL ANÁLISIS
+        score_dq, nivel_confianza, metricas_dq = evaluar_calidad_datos(df_viajes, columnas_mapeadas)
         
-        # 4. MEMORIA CRUZADA: Cargar facturación para auditar fraudes
         facturas_dict = {}
         if sheet_facturacion is not None:
             col_fact_viaje = find_col(sheet_facturacion, "VIAJE_ID")
@@ -87,24 +138,30 @@ async def procesar_archivo(file: UploadFile = File(...)):
         dinero_en_riesgo = 0
         hallazgos = []
 
-        # 5. EL MOTOR ECONÓMICO Y DE REGLAS (Ejecutándose en el Backend)
+        # Motor Económico
         for index, row in df_viajes.iterrows():
-            viaje_id = str(row[col_viaje]) if col_viaje and pd.notna(row[col_viaje]) else f"Fila {index+1}"
-            vehiculo = str(row[col_vehiculo]) if col_vehiculo and pd.notna(row[col_vehiculo]) else "N/A"
+            viaje_id = str(row[columnas_mapeadas["VIAJE_ID"]]) if columnas_mapeadas["VIAJE_ID"] and pd.notna(row[columnas_mapeadas["VIAJE_ID"]]) else f"Fila {index+1}"
+            vehiculo = str(row[columnas_mapeadas["VEHICULO"]]) if columnas_mapeadas["VEHICULO"] and pd.notna(row[columnas_mapeadas["VEHICULO"]]) else "N/A"
             
-            ingreso = float(row[col_ingreso]) if col_ingreso and pd.notna(row[col_ingreso]) else 0
-            costo = float(row[col_costo]) if col_costo and pd.notna(row[col_costo]) else 0
-            margen = float(row[col_margen]) if col_margen and pd.notna(row[col_margen]) else (ingreso - costo)
-            margen_pct = float(row[col_margen_pct]) if col_margen_pct and pd.notna(row[col_margen_pct]) else ((margen / ingreso * 100) if ingreso > 0 else 0)
+            # Limpieza rápida de datos al vuelo (por si la validez falló)
+            try: ingreso = float(row[columnas_mapeadas["INGRESO"]]) if columnas_mapeadas["INGRESO"] and pd.notna(row[columnas_mapeadas["INGRESO"]]) else 0
+            except: ingreso = 0
+            try: costo = float(row[columnas_mapeadas["COSTO"]]) if columnas_mapeadas["COSTO"] and pd.notna(row[columnas_mapeadas["COSTO"]]) else 0
+            except: costo = 0
             
-            km = float(row[col_km]) if col_km and pd.notna(row[col_km]) else 0
-            litros = float(row[col_litros]) if col_litros and pd.notna(row[col_litros]) else 0
-            otros_costos = float(row[col_otros_costos]) if col_otros_costos and pd.notna(row[col_otros_costos]) else 0
+            margen = float(row[columnas_mapeadas["MARGEN"]]) if columnas_mapeadas["MARGEN"] and pd.notna(row[columnas_mapeadas["MARGEN"]]) else (ingreso - costo)
+            margen_pct = float(row[columnas_mapeadas["MARGEN_PCT"]]) if columnas_mapeadas["MARGEN_PCT"] and pd.notna(row[columnas_mapeadas["MARGEN_PCT"]]) else ((margen / ingreso * 100) if ingreso > 0 else 0)
+            
+            try: km = float(row[columnas_mapeadas["KM"]]) if columnas_mapeadas["KM"] and pd.notna(row[columnas_mapeadas["KM"]]) else 0
+            except: km = 0
+            try: litros = float(row[columnas_mapeadas["LITROS"]]) if columnas_mapeadas["LITROS"] and pd.notna(row[columnas_mapeadas["LITROS"]]) else 0
+            except: litros = 0
+            try: otros_costos = float(row[columnas_mapeadas["OTROS_COSTOS"]]) if columnas_mapeadas["OTROS_COSTOS"] and pd.notna(row[columnas_mapeadas["OTROS_COSTOS"]]) else 0
+            except: otros_costos = 0
 
             total_ingresos += ingreso
             total_costos += costo
 
-            # REGLA 1: MARGEN DESTRUIDO
             if margen_pct <= 0:
                 impacto = abs(margen)
                 dinero_en_riesgo += impacto
@@ -119,7 +176,6 @@ async def procesar_archivo(file: UploadFile = File(...)):
                     "accion": "Auditar costos extraordinarios y retener liquidación."
                 })
 
-            # REGLA 2: RENDIMIENTO / HUACHICOL
             if km > 0 and litros > 0:
                 rendimiento_real = km / litros
                 rendimiento_esperado = 2.6
@@ -138,9 +194,10 @@ async def procesar_archivo(file: UploadFile = File(...)):
                         "accion": "Cruzar carga de diésel con telemetría GPS del motor."
                     })
 
-            # REGLA 3: FRAUDE CRUZADO (Operaciones vs Facturación)
             if sheet_facturacion is not None and viaje_id in facturas_dict:
-                ingreso_facturado = float(facturas_dict[viaje_id]) if pd.notna(facturas_dict[viaje_id]) else 0
+                try: ingreso_facturado = float(facturas_dict[viaje_id]) if pd.notna(facturas_dict[viaje_id]) else 0
+                except: ingreso_facturado = 0
+                
                 if ingreso_facturado < ingreso and (ingreso - ingreso_facturado) > 10:
                     impacto_fact = ingreso - ingreso_facturado
                     dinero_en_riesgo += impacto_fact
@@ -155,13 +212,17 @@ async def procesar_archivo(file: UploadFile = File(...)):
                         "accion": "Detener pago a proveedores de este viaje hasta cuadrar factura con el cliente."
                     })
 
-        # Ordenar hallazgos de mayor a menor impacto (El Radar)
         hallazgos = sorted(hallazgos, key=lambda x: x['impacto'], reverse=True)
         margen_global = ((total_ingresos - total_costos) / total_ingresos * 100) if total_ingresos > 0 else 0
 
-        # Respuesta final empaquetada con Inteligencia
+        # EL OBJETO DEFINITIVO
         return {
             "status": "success",
+            "calidad_datos": {
+                "scoreGlobal": score_dq,
+                "nivelConfianza": nivel_confianza,
+                "metricas": metricas_dq
+            },
             "analisis": {
                 "totalIngresos": total_ingresos,
                 "totalCostos": total_costos,
@@ -170,7 +231,7 @@ async def procesar_archivo(file: UploadFile = File(...)):
                 "totalHallazgos": len(hallazgos),
                 "filasAnalizadas": len(df_viajes)
             },
-            "hallazgos": hallazgos[:10] # Top 10
+            "hallazgos": hallazgos[:10]
         }
 
     except Exception as e:
@@ -178,4 +239,4 @@ async def procesar_archivo(file: UploadFile = File(...)):
 
 @app.get("/")
 def health_check():
-    return {"status": "Motor Inteligente GENESIS CORE v0.2 en línea y operando."}
+    return {"status": "Motor Inteligente GENESIS CORE v0.3 en línea y operando."}
