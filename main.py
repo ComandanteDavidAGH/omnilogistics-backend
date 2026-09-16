@@ -137,7 +137,13 @@ async def procesar_archivo(file: UploadFile = File(...)):
         total_costos = 0
         dinero_en_riesgo = 0
         hallazgos = []
-
+# ⚡ RADAR DE CLONES (Pre-procesamiento)
+        col_viaje = columnas_mapeadas["VIAJE_ID"]
+        viajes_duplicados = set()
+        if col_viaje:
+            df_dups = df_viajes[df_viajes.duplicated(subset=[col_viaje], keep=False)]
+            viajes_duplicados = set(df_dups[col_viaje].dropna().astype(str))
+        viajes_reportados = set() # Para no escupir la alerta 5 veces si se clonó 5 veces
         # Motor Económico
         for index, row in df_viajes.iterrows():
             viaje_id = str(row[columnas_mapeadas["VIAJE_ID"]]) if columnas_mapeadas["VIAJE_ID"] and pd.notna(row[columnas_mapeadas["VIAJE_ID"]]) else f"Fila {index+1}"
