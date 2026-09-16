@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import io
 
-app = FastAPI(title="GENESIS OMNI CORE", version="0.3")
+app = FastAPI(title="GENESIS OMNI CORE", version="0.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,7 +40,7 @@ def find_col(df, semantic_key):
     return None
 
 # ==========================================
-# 2. DATA QUALITY GATE (NUEVO MOTOR)
+# 2. DATA QUALITY GATE
 # ==========================================
 def evaluar_calidad_datos(df, columnas_mapeadas):
     total_filas = len(df)
@@ -86,7 +86,7 @@ def evaluar_calidad_datos(df, columnas_mapeadas):
 @app.post("/api/procesar-matriz")
 async def procesar_archivo(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(('.xlsx', '.xls', '.xlsm')):
-        raise HTTPException(status_code=400, detail="GENESIS v0.3 requiere un archivo Excel.")
+        raise HTTPException(status_code=400, detail="GENESIS requiere un archivo Excel.")
     
     try:
         contents = await file.read()
@@ -124,12 +124,38 @@ async def procesar_archivo(file: UploadFile = File(...)):
                     v_id = str(r[col_fact_viaje]).strip()
                     facturas_dict[v_id] = r[col_fact_ingreso]
 
+        # ==========================================
+        # ⚡ 3.5 MOTOR DE PATRONES (Baselines Dinámicos)
+        # ==========================================
+        baselines_vehiculo = {}
+        baseline_global = 2.5 # Respaldo si todo el Excel está roto
+        
+        col_km = columnas_mapeadas["KM"]
+        col_lt = columnas_mapeadas["LITROS"]
+        col_vehiculo = columnas_mapeadas["VEHICULO"]
+        
+        if col_km and col_lt:
+            df_viajes['tmp_km'] = pd.to_numeric(df_viajes[col_km], errors='coerce').fillna(0)
+            df_viajes['tmp_lt'] = pd.to_numeric(df_viajes[col_lt], errors='coerce').fillna(0)
+            
+            # Calcular rendimiento real sin dividir por cero
+            df_viajes['tmp_rend'] = np.where(df_viajes['tmp_lt'] > 0, df_viajes['tmp_km'] / df_viajes['tmp_lt'], np.nan)
+            df_viajes['tmp_rend'] = df_viajes['tmp_rend'].replace([np.inf, -np.inf, 0], np.nan)
+            
+            b_global = df_viajes['tmp_rend'].mean()
+            if not pd.isna(b_global): 
+                baseline_global = b_global
+            
+            if col_vehiculo:
+                # Aprender el patrón histórico de cada camión
+                baselines_vehiculo = df_viajes.groupby(col_vehiculo)['tmp_rend'].mean().to_dict()
+
         total_ingresos = 0
         total_costos = 0
         dinero_en_riesgo = 0
         hallazgos = []
 
-        # ⚡ RADAR DE CLONES (Integrado correctamente)
+        # Radar de Clones
         col_viaje = columnas_mapeadas["VIAJE_ID"]
         viajes_duplicados = set()
         if col_viaje:
@@ -137,7 +163,9 @@ async def procesar_archivo(file: UploadFile = File(...)):
             viajes_duplicados = set(df_dups[col_viaje].dropna().astype(str))
         viajes_reportados = set() 
 
-        # Motor Económico
+        # ==========================================
+        # 4. MOTOR ECONÓMICO Y DE REGLAS 
+        # ==========================================
         for index, row in df_viajes.iterrows():
             viaje_id = str(row[columnas_mapeadas["VIAJE_ID"]]) if columnas_mapeadas["VIAJE_ID"] and pd.notna(row[columnas_mapeadas["VIAJE_ID"]]) else f"Fila {index+1}"
             vehiculo = str(row[columnas_mapeadas["VEHICULO"]]) if columnas_mapeadas["VEHICULO"] and pd.notna(row[columnas_mapeadas["VEHICULO"]]) else "N/A"
@@ -175,24 +203,31 @@ async def procesar_archivo(file: UploadFile = File(...)):
                     "accion": "Auditar costos extraordinarios y retener liquidación."
                 })
 
-            # REGLA 2: HUACHICOL
+            # ⚡ REGLA 2 EVOLUCIONADA: PATRÓN DINÁMICO DE COMBUSTIBLE
             if km > 0 and litros > 0:
                 rendimiento_real = km / litros
-                rendimiento_esperado = 2.6
-                if rendimiento_real < 2.25:
+                # Buscar el baseline específico de este camión, si no existe, usar el global
+                rendimiento_esperado = baselines_vehiculo.get(vehiculo, baseline_global)
+                if pd.isna(rendimiento_esperado): rendimiento_esperado = baseline_global
+                
+                # Desviación permitida: 15% por debajo de su propio estándar
+                umbral_fuga = rendimiento_esperado * 0.85 
+                
+                if rendimiento_real < umbral_fuga:
                     litros_desperdiciados = litros - (km / rendimiento_esperado)
                     impacto_comb = litros_desperdiciados * 25.0 
-                    dinero_en_riesgo += impacto_comb
-                    hallazgos.append({
-                        "id": f"F2-{viaje_id}",
-                        "prioridad": 2,
-                        "tipo": "FUGA_COMBUSTIBLE",
-                        "titulo": f"Consumo Anormal - Viaje {viaje_id}",
-                        "causa": f"Rendimiento de {rendimiento_real:.2f} km/L vs {rendimiento_esperado} esperado.",
-                        "impacto": impacto_comb,
-                        "vehiculo": vehiculo,
-                        "accion": "Cruzar carga de diésel con telemetría GPS del motor."
-                    })
+                    if impacto_comb > 0:
+                        dinero_en_riesgo += impacto_comb
+                        hallazgos.append({
+                            "id": f"F2-{viaje_id}",
+                            "prioridad": 2,
+                            "tipo": "FUGA_COMBUSTIBLE",
+                            "titulo": f"Consumo Anormal - Viaje {viaje_id}",
+                            "causa": f"Rendimiento de {rendimiento_real:.2f} km/L vs {rendimiento_esperado:.2f} (Patrón histórico del camión).",
+                            "impacto": impacto_comb,
+                            "vehiculo": vehiculo,
+                            "accion": "Cruzar carga de diésel con telemetría GPS del motor."
+                        })
 
             # REGLA 3: FRAUDE DE FACTURACION
             if sheet_facturacion is not None and viaje_id in facturas_dict:
@@ -213,7 +248,7 @@ async def procesar_archivo(file: UploadFile = File(...)):
                         "accion": "Detener pago a proveedores de este viaje hasta cuadrar factura con el cliente."
                     })
 
-            # ⚡ REGLA 4: DETECCIÓN DE CLONES (El que faltaba)
+            # REGLA 4: DETECCIÓN DE CLONES
             if col_viaje and viaje_id in viajes_duplicados and viaje_id not in viajes_reportados:
                 viajes_reportados.add(viaje_id)
                 impacto_clon = costo 
@@ -223,7 +258,7 @@ async def procesar_archivo(file: UploadFile = File(...)):
                     "prioridad": 1,
                     "tipo": "CLONACION_DETECTADA",
                     "titulo": f"Alerta de Clonación - Viaje {viaje_id}",
-                    "causa": f"Registro duplicado detectado. Riesgo inminente de pago doble o doble liquidación.",
+                    "causa": f"Registro duplicado detectado. Riesgo inminente de pago doble.",
                     "impacto": impacto_clon,
                     "vehiculo": vehiculo,
                     "accion": "Bloquear liquidación en el ERP y eliminar la fila clonada inmediatamente."
@@ -255,4 +290,4 @@ async def procesar_archivo(file: UploadFile = File(...)):
 
 @app.get("/")
 def health_check():
-    return {"status": "Motor Inteligente GENESIS CORE v0.3 en línea y operando."}
+    return {"status": "Motor Inteligente GENESIS CORE v0.4 en línea y operando."}
