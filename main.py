@@ -10,15 +10,23 @@ import difflib
 # =================================================================
 class GenesisDataUnderstanding:
     def __init__(self):
+        # 1. DICCIONARIO EXPANDIDO: Ahora GENESIS entiende operaciones completas
         self.canonical_model = {
+            "TRIP_ID": {"synonyms": ["viaje", "folio", "id", "ticket", "operacion", "guia"], "expected_type": "text"},
             "VEHICLE_ID": {"synonyms": ["placa", "unidad", "vehiculo", "tracto", "truck", "camion", "placas"], "expected_type": "text"},
             "TRIP_DATE": {"synonyms": ["fecha", "date", "salida", "emision", "dia"], "expected_type": "date"},
-            "REVENUE": {"synonyms": ["ingreso", "tarifa", "flete", "facturado", "revenue", "importe", "total", "subtotal"], "expected_type": "numeric"},
-            "COST_FUEL": {"synonyms": ["diesel", "combustible", "gasolina", "fuel", "gasto"], "expected_type": "numeric"}
+            "REVENUE": {"synonyms": ["ingreso", "tarifa", "flete", "facturado", "revenue", "importe", "total", "subtotal", "monto"], "expected_type": "numeric"},
+            "COST_FUEL": {"synonyms": ["diesel", "combustible", "gasolina", "fuel", "costo", "gasto"], "expected_type": "numeric"},
+            "DISTANCE_KM": {"synonyms": ["km", "kilometros", "distancia", "recorrido"], "expected_type": "numeric"},
+            "VOLUME_LTS": {"synonyms": ["litros", "lts", "volumen", "galones"], "expected_type": "numeric"}
         }
 
     def _infer_data_type(self, series: pd.Series) -> str:
-        if pd.api.types.is_numeric_dtype(series):
+        # 2. PROFILING AVANZADO: Limpiamos símbolos extraños antes de evaluar
+        cleaned_series = series.astype(str).str.replace(r'[$,\s]', '', regex=True)
+        is_really_numeric = pd.to_numeric(cleaned_series, errors='coerce').notna().mean() > 0.6
+
+        if is_really_numeric or pd.api.types.is_numeric_dtype(series):
             return "numeric"
         elif pd.api.types.is_datetime64_any_dtype(series) or "fecha" in str(series.name).lower():
             return "date"
@@ -45,24 +53,29 @@ class GenesisDataUnderstanding:
 
             for canonical_key, rules in self.canonical_model.items():
                 for syn in rules["synonyms"]:
-                    similitud = difflib.SequenceMatcher(None, col_str, syn).ratio()
-                    if syn in col_str:
-                        similitud = max(similitud, 0.85)
+                    # 3. LÓGICA DE SIMILITUD MEJORADA
+                    if syn == col_str:
+                        similitud = 1.0  # Match exacto
+                    elif syn in col_str or col_str in syn:
+                        similitud = 0.90 # Match parcial fuerte
+                    else:
+                        similitud = difflib.SequenceMatcher(None, col_str, syn).ratio()
 
-                    if rules["expected_type"] != actual_type:
-                        similitud = similitud * 0.1
+                    # Penalización por tipo de dato (más suave para no romper matches obvios)
+                    if rules["expected_type"] != actual_type and similitud < 1.0:
+                        similitud = similitud * 0.4 
 
                     if similitud > highest_confidence:
                         highest_confidence = similitud
                         best_match = canonical_key
 
-            if highest_confidence >= 0.80:
+            if highest_confidence >= 0.85:
                 understanding_result["fields_mapping"][col] = {
                     "canonical": best_match,
                     "confidence": round(highest_confidence, 2),
                     "detected_type": actual_type
                 }
-            elif highest_confidence >= 0.30:
+            elif highest_confidence >= 0.35:
                 understanding_result["ambiguities"].append({
                     "original_column": col,
                     "detected_type": actual_type,
