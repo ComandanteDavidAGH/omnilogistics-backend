@@ -92,84 +92,79 @@ class DataQualityGate:
 
 class EconomicRuleEngine:
     """
-    Escalón 3: Aplica reglas de negocio sobre montos, identifica duplicidades de viaje
-    y desviaciones tarifarias extremas.
+    Escalón 3: Reglas financieras adaptables con vocabulario expandido.
     """
     def analyze(self, df: pd.DataFrame, quality_metrics: dict):
         cols = list(df.columns)
 
         def buscar_columna(keywords):
             for c in cols:
-                if any(kw in c for kw in keywords):
+                if any(kw in str(c).lower() for kw in keywords):
                     return c
             return None
 
-        # Identificar columnas semánticas clave
-        col_monto = buscar_columna(['monto', 'ingreso', 'tarifa', 'precio', 'total', 'revenue', 'billing', 'flete', 'costo'])
-        col_vehiculo = buscar_columna(['vehiculo', 'vehículo', 'unidad', 'camion', 'camión', 'truck', 'placa', 'id_unidad', 'equipo'])
-        col_id = buscar_columna(['id', 'viaje', 'operacion', 'operación', 'folio', 'ticket', 'guia', 'guía'])
-        col_fecha = buscar_columna(['fecha', 'date', 'dia', 'día'])
+        # Vocabulario extendido para encontrar columnas en cualquier Excel B2B
+        col_monto = buscar_columna(['monto', 'ingreso', 'tarifa', 'precio', 'total', 'revenue', 'billing', 'flete', 'costo', 'importe', 'val', 'subtotal'])
+        col_vehiculo = buscar_columna(['vehiculo', 'vehículo', 'unidad', 'camion', 'camión', 'truck', 'placa', 'equipo', 'tracto', 'placas'])
+        col_id = buscar_columna(['id', 'viaje', 'operacion', 'operación', 'folio', 'ticket', 'guia', 'guía', 'factura', 'remision', 'remisión', 'servicio'])
+        col_fecha = buscar_columna(['fecha', 'date', 'dia', 'día', 'emision', 'salida'])
 
-        # CÁLCULO DE INGRESO OPERATIVO
+        # 1. Ingreso Operativo Real
         if col_monto and pd.api.types.is_numeric_dtype(df[col_monto]):
             total_ingresos = float(df[col_monto].dropna().sum())
         else:
-            # Suma fallback sobre todas las columnas numéricas si no hay coincidencia directa
             num_df = df.select_dtypes(include=[np.number])
             total_ingresos = float(num_df.sum().sum()) if not num_df.empty else 0.0
 
         anomalias = []
 
-        # REGLA 1: Detección de Operaciones/Viajes Clonados
-        cols_duplicadas = [c for c in [col_vehiculo, col_id, col_fecha, col_monto] if c is not None]
-        if len(cols_duplicadas) >= 2:
-            duplicados = df[df.duplicated(subset=cols_duplicadas, keep=False)]
+        # 2. Detección de Duplicados (Evaluación flexible)
+        criterios_duplicados = [c for c in [col_id, col_vehiculo, col_fecha] if c is not None]
+        
+        if len(criterios_duplicados) > 0:
+            duplicados = df[df.duplicated(subset=criterios_duplicados, keep=False)]
             if not duplicados.empty:
-                agrupados = duplicados.groupby(col_vehiculo if col_vehiculo else cols_duplicadas[0])
-                for veh, group in agrupados:
-                    nombre_veh = str(veh) if pd.notna(veh) else "DESCONOCIDO"
-                    impacto = float(group[col_monto].sum() / 2) if col_monto and pd.api.types.is_numeric_dtype(group[col_monto]) else 2500.0
+                col_agrupador = col_vehiculo if col_vehiculo else criterios_duplicados[0]
+                agrupados = duplicados.groupby(col_agrupador)
+                
+                for key, group in agrupados:
+                    monto_fuga = float(group[col_monto].sum() / 2) if col_monto and pd.api.types.is_numeric_dtype(group[col_monto]) else 1500.0
                     anomalias.append({
                         "prioridad": 1,
-                        "vehiculo": nombre_veh,
-                        "titulo": "Clonación de Operación Detectada",
-                        "causa": f"Se identificaron {len(group)} registros duplicados con coincidencia en campos clave.",
-                        "accion": "Verificar duplicidad en ERP antes de autorizar dispersión de pago.",
-                        "impacto": round(impacto, 2)
+                        "vehiculo": str(key),
+                        "titulo": "Clonación o Registro Duplicado Detectado",
+                        "causa": f"Se detectaron {len(group)} registros idénticos en los campos: {', '.join(criterios_duplicados)}.",
+                        "accion": "Verificar duplicidad en ERP antes de dispersar el pago.",
+                        "impacto": round(monto_fuga, 2)
                     })
 
-        # REGLA 2: Sobreprecios / Tarifas fuera de rango estadístico (Outliers > 2 Desviaciones Estándar)
+        # 3. Detección de Desviaciones Tarifarias (> 1.5 Desviaciones Estándar)
         if col_monto and pd.api.types.is_numeric_dtype(df[col_monto]) and len(df) > 5:
             media = df[col_monto].mean()
             std = df[col_monto].std()
             if std > 0:
-                outliers = df[df[col_monto] > (media + (2 * std))]
+                outliers = df[df[col_monto] > (media + (1.5 * std))]
                 for idx, row in outliers.head(5).iterrows():
-                    nombre_veh = str(row[col_vehiculo]) if col_vehiculo and pd.notna(row[col_vehiculo]) else f"Fila #{idx + 1}"
+                    veh_label = str(row[col_vehiculo]) if col_vehiculo and pd.notna(row[col_vehiculo]) else f"Fila #{idx + 1}"
                     val = float(row[col_monto])
-                    impacto_exceso = float(val - media)
                     anomalias.append({
                         "prioridad": 2,
-                        "vehiculo": nombre_veh,
-                        "titulo": "Desviación de Tarifa / Sobreprecio",
-                        "causa": f"El monto (${val:,.2f}) excede significativamente el promedio de la operación (${media:,.2f}).",
-                        "accion": "Ajustar factura a tarifa base negociada o requerir comprobante.",
-                        "impacto": round(impacto_exceso, 2)
+                        "vehiculo": veh_label,
+                        "titulo": "Sobreprecio / Tarifa Fuera de Rango",
+                        "causa": f"Monto registrado (${val:,.2f}) excede el promedio de la ruta (${media:,.2f}).",
+                        "accion": "Ajustar cobro a la tarifa base negociada.",
+                        "impacto": round(val - media, 2)
                     })
 
-        # Dinero en riesgo acumulado
         dinero_en_riesgo = float(sum(a["impacto"] for a in anomalias))
-
-        # Cálculo de Margen Global estimado
-        base_margen = 25.0
         porcentaje_riesgo = (dinero_en_riesgo / total_ingresos * 100) if total_ingresos > 0 else 0
-        margen_global = max(0.0, float(round(base_margen - (porcentaje_riesgo * 0.3), 2)))
+        margen_global = max(0.0, float(round(25.0 - (porcentaje_riesgo * 0.3), 2)))
 
-        resultados_financieros = {
+        return {
             "totalIngresos": round(total_ingresos, 2),
             "margenGlobal": margen_global,
             "dineroEnRiesgo": round(dinero_en_riesgo, 2)
-        }
+        }, sorted(anomalias, key=lambda x: x["prioridad"])[:10]
 
         # Ordenar por nivel de prioridad (1 = CRÍTICO, 2 = ALTO)
         anomalias = sorted(anomalias, key=lambda x: x["prioridad"])[:10]
