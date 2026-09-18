@@ -161,10 +161,11 @@ class DataQualityGate:
 # =================================================================
 class EvidenceEngine:
     @staticmethod
-    def generate(anom_type: str, base_val: float, obs_val: float, n_samples: int):
+    def generate(anom_type: str, base_val: float, obs_val: float, n_samples: int, contexto_dimensional: str = "Global"):
         confidence = min(99.0, 50.0 + (n_samples * 2.5)) if n_samples > 0 else 50.0
         desviacion = round(((obs_val - base_val) / base_val) * 100, 1) if base_val > 0 else 0.0
         return {
+            "segmento_analizado": contexto_dimensional,
             "linea_base": round(base_val, 2),
             "valor_observado": round(obs_val, 2),
             "desviacion_pct": desviacion,
@@ -184,17 +185,17 @@ class ImpactEngine:
 
 class ActionEngine:
     @staticmethod
-    def route(anom_type: str, vehiculo: str):
+    def route(anom_type: str, vehiculo: str, contexto: str = ""):
         if anom_type == "DUPLICADO":
             return {"departamento": "Contabilidad", "accion": "Revisar facturación doble en ERP.", "urgencia": "ALTA"}
         elif anom_type == "MARGEN_NEGATIVO":
-            return {"departamento": "Pricing/Ventas", "accion": "Auditar tarifa pactada con el cliente.", "urgencia": "MEDIA"}
-        elif anom_type == "OUTLIER":
-            return {"departamento": "Operaciones", "accion": f"Auditar viaje atípico en vehículo {vehiculo}.", "urgencia": "ALTA"}
+            return {"departamento": "Pricing/Ventas", "accion": f"Auditar tarifa vs gasto directo en el segmento: {contexto}.", "urgencia": "MEDIA"}
+        elif anom_type == "OUTLIER_CONTEXTUAL":
+            return {"departamento": "Operaciones", "accion": f"Auditar viaje atípico en {vehiculo} (Desviación dentro del segmento {contexto}).", "urgencia": "ALTA"}
         return {"departamento": "Auditoría", "accion": "Revisión general.", "urgencia": "BAJA"}
 
 # =================================================================
-# 💸 MOTOR ECONÓMICO RELACIONAL DINÁMICO
+# 💸 MOTOR ECONÓMICO RELACIONAL DINÁMICO (Análisis Dimensional)
 # =================================================================
 class EconomicRuleEngine:
     def _to_numeric(self, series: pd.Series) -> pd.Series:
@@ -243,10 +244,16 @@ class EconomicRuleEngine:
 
     def analyze(self, master_df: pd.DataFrame, config: dict):
         anomalies = []
+        
         has_revenue = "REVENUE" in master_df.columns
         has_cost = "COST_FUEL" in master_df.columns
         has_vehicle = "VEHICLE_ID" in master_df.columns
         has_trip_id = "TRIP_ID" in master_df.columns
+
+        # INTELIGENCIA DIMENSIONAL: Buscar campos de segmentación
+        dimensions = []
+        if "ROUTE_NAME" in master_df.columns: dimensions.append("ROUTE_NAME")
+        if "CUSTOMER_NAME" in master_df.columns: dimensions.append("CUSTOMER_NAME")
 
         allow_neg = bool(config.get("allow_negative_margin", 0))
 
@@ -260,6 +267,7 @@ class EconomicRuleEngine:
         dinero_en_riesgo = 0.0
         prioridad = 1
 
+        # 1. Duplicidad Operativa
         subset = ["TRIP_ID"] if has_trip_id else None
         dup_mask = master_df.duplicated(subset=subset, keep="first")
         if dup_mask.sum() > 0:
@@ -270,27 +278,82 @@ class EconomicRuleEngine:
             anomalies.append({
                 "prioridad": prioridad, "vehiculo": vehiculos_afectados, "titulo": "Duplicidad Operativa", 
                 "causa": f"{dup_mask.sum()} registros clonados.", 
-                "evidencia": EvidenceEngine.generate("DUPLICADO", 0, impacto_dup, len(master_df)),
+                "evidencia": EvidenceEngine.generate("DUPLICADO", 0, impacto_dup, len(master_df), "Global"),
                 "impacto": ImpactEngine.project(impacto_dup),
                 "accion": ActionEngine.route("DUPLICADO", vehiculos_afectados)
             })
             prioridad += 1
 
+        # 2. Margen Negativo Contextual
         if has_revenue and has_cost and not allow_neg:
             neg_mask = (master_df["COST_FUEL"] > master_df["REVENUE"]) & (master_df["REVENUE"] > 0)
             if neg_mask.sum() > 0:
-                impacto_neg = float((master_df.loc[neg_mask, "COST_FUEL"] - master_df.loc[neg_mask, "REVENUE"]).sum())
-                dinero_en_riesgo += impacto_neg
-                vehiculos_neg = ", ".join(sorted(set(master_df.loc[neg_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
+                for idx, row in master_df[neg_mask].iterrows():
+                    impacto_neg = float(row["COST_FUEL"] - row["REVENUE"])
+                    dinero_en_riesgo += impacto_neg
+                    vehiculo = str(row.get("VEHICLE_ID", "N/D"))
+                    
+                    # Extraer contexto si existe
+                    contexto_str = "Global"
+                    if dimensions:
+                        contexto_str = " | ".join([f"{dim}: {row[dim]}" for dim in dimensions if pd.notna(row[dim])])
+
+                    anomalies.append({
+                        "prioridad": prioridad, "vehiculo": vehiculo, "titulo": "Margen Negativo Detectado", 
+                        "causa": f"Viaje costó más en diésel (${row['COST_FUEL']:,.2f}) que el ingreso facturado (${row['REVENUE']:,.2f}).", 
+                        "evidencia": EvidenceEngine.generate("MARGEN_NEGATIVO", float(row['REVENUE']), float(row['COST_FUEL']), 1, contexto_str),
+                        "impacto": ImpactEngine.project(impacto_neg),
+                        "accion": ActionEngine.route("MARGEN_NEGATIVO", vehiculo, contexto_str)
+                    })
+                    prioridad += 1
+
+        # 3. OUTLIERS CONTEXTUALES (Manzanas con Manzanas)
+        if has_revenue and len(master_df) > 0:
+            if dimensions: # Si hay dimensiones (Ej: Ruta), agrupar.
+                group_key = dimensions
+                # Contar tamaño de muestra por grupo
+                master_df['_GROUP_COUNT'] = master_df.groupby(group_key)['REVENUE'].transform('count')
                 
-                anomalies.append({
-                    "prioridad": prioridad, "vehiculo": vehiculos_neg, "titulo": "Margen Negativo (Pérdida Directa)", 
-                    "causa": f"{neg_mask.sum()} viajes en pérdida.", 
-                    "evidencia": EvidenceEngine.generate("MARGEN_NEGATIVO", total_ingresos / len(master_df), impacto_neg, len(master_df)),
-                    "impacto": ImpactEngine.project(impacto_neg),
-                    "accion": ActionEngine.route("MARGEN_NEGATIVO", vehiculos_neg)
-                })
-                prioridad += 1
+                # Procesar grupos con suficiente muestra (>= 3)
+                valid_groups = master_df['_GROUP_COUNT'] >= 3
+                if valid_groups.sum() > 0:
+                    master_df.loc[valid_groups, '_CTX_MEAN'] = master_df[valid_groups].groupby(group_key)['REVENUE'].transform('mean')
+                    master_df.loc[valid_groups, '_CTX_STD'] = master_df[valid_groups].groupby(group_key)['REVENUE'].transform('std', ddof=0)
+                    master_df.loc[valid_groups, '_CTX_Z'] = (master_df.loc[valid_groups, 'REVENUE'] - master_df.loc[valid_groups, '_CTX_MEAN']) / master_df.loc[valid_groups, '_CTX_STD'].replace(0, np.nan)
+                    
+                    outlier_mask = valid_groups & (master_df['_CTX_Z'].abs() > 3)
+                    
+                    for idx, row in master_df[outlier_mask].iterrows():
+                        impacto_out = float(row['REVENUE'])
+                        vehiculo = str(row.get("VEHICLE_ID", "N/D"))
+                        contexto_str = " | ".join([f"{dim}: {row[dim]}" for dim in dimensions if pd.notna(row[dim])])
+                        
+                        anomalies.append({
+                            "prioridad": prioridad, "vehiculo": vehiculo, "titulo": "Ingreso Atípico Contextual", 
+                            "causa": f"El ingreso de este viaje se sale del patrón normal exclusivamente para su segmento.", 
+                            "evidencia": EvidenceEngine.generate("OUTLIER_CONTEXTUAL", float(row['_CTX_MEAN']), impacto_out, int(row['_GROUP_COUNT']), contexto_str),
+                            "impacto": ImpactEngine.project(impacto_out, 1),
+                            "accion": ActionEngine.route("OUTLIER_CONTEXTUAL", vehiculo, contexto_str)
+                        })
+                        prioridad += 1
+            else:
+                # Fallback Global (Si el usuario no mapeó Rutas ni Clientes)
+                mean_rev = master_df["REVENUE"].mean()
+                std_rev = master_df["REVENUE"].std(ddof=0)
+                if std_rev > 0:
+                    z_scores = (master_df["REVENUE"] - mean_rev) / std_rev
+                    outlier_mask = z_scores.abs() > 3
+                    if outlier_mask.sum() > 0:
+                        impacto_out = float(master_df.loc[outlier_mask, "REVENUE"].sum())
+                        vehiculos_out = ", ".join(sorted(set(master_df.loc[outlier_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
+                        anomalies.append({
+                            "prioridad": prioridad, "vehiculo": vehiculos_out, "titulo": "Ingresos Atípicos Globales", 
+                            "causa": "Desviación superior a 3 Sigmas sobre el global (No se aportaron dimensiones para segmentar).", 
+                            "evidencia": EvidenceEngine.generate("OUTLIER", mean_rev, impacto_out, len(master_df), "Global"),
+                            "impacto": ImpactEngine.project(impacto_out, 1),
+                            "accion": ActionEngine.route("OUTLIER", vehiculos_out)
+                        })
+                        prioridad += 1
 
         financial_results = {"totalIngresos": round(total_ingresos, 2), "totalCostos": round(total_costos, 2), "margenGlobal": margen_global, "dineroEnRiesgo": round(dinero_en_riesgo, 2)}
         warnings = []
@@ -301,7 +364,7 @@ class EconomicRuleEngine:
 # =================================================================
 # 🚀 ORQUESTADOR API (SISTEMA NERVIOSO CENTRAL)
 # =================================================================
-app = FastAPI(title="GENESIS CORE B2B - Central Brain Engine")
+app = FastAPI(title="GENESIS CORE B2B - Dimensional Brain")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 def _read_excel_or_csv_multisheet(filename: str, file_bytes: bytes) -> dict:
@@ -311,7 +374,7 @@ def _read_excel_or_csv_multisheet(filename: str, file_bytes: bytes) -> dict:
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "brain_version": "0.6.4-Nivel3", "timestamp": datetime.datetime.utcnow().isoformat()}
+    return {"status": "healthy", "brain_version": "0.6.5-Dimensional", "timestamp": datetime.datetime.utcnow().isoformat()}
 
 @app.post("/api/v1/data-understanding")
 async def data_understanding(file: UploadFile = File(...)):
