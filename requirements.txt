@@ -5,3 +5,4 @@ numpy
 openpyxl
 python-multipart
 python-calamine
+SQLAlchemy
