@@ -10,7 +10,7 @@ import difflib
 import datetime
 
 # =================================================================
-# 🗄️ CAPA DE PERSISTENCIA (Fase Gamma - Nivel 3)
+# 🗄️ PERSISTENCIA (SISTEMA NERVIOSO CENTRAL)
 # =================================================================
 DATABASE_URL = "sqlite:///./genesis_b2b.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -35,24 +35,22 @@ class TenantConfig(Base):
     z_score_threshold = Column(Float, default=3.0)
     allow_negative_margin = Column(Integer, default=0)
 
-# NUEVA TABLA: Workflow de Acciones (Action Engine)
 class ActionTask(Base):
     __tablename__ = "action_tasks"
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(String, index=True)
     audit_id = Column(Integer)
-    department = Column(String) # Mantenimiento, Contabilidad, Operaciones
+    department = Column(String)
     title = Column(String)
     description = Column(String)
     financial_impact = Column(Float)
-    status = Column(String, default="PENDIENTE") # PENDIENTE, EN_REVISION, CERRADO
+    status = Column(String, default="PENDIENTE")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
 
-
 # =================================================================
-# 🧠 FASE 1: MOTOR SEMÁNTICO (DATA UNDERSTANDING)
+# 🧠 MOTOR SEMÁNTICO (DATA MODEL v0.2 EXPANDIDO)
 # =================================================================
 class GenesisDataUnderstanding:
     def __init__(self):
@@ -64,6 +62,12 @@ class GenesisDataUnderstanding:
             },
             "VEHICLE": {
                 "VEHICLE_ID": {"type": "text", "synonyms": ["placa", "unidad", "vehiculo", "tracto", "truck", "camion"]}
+            },
+            "DRIVER": {
+                "DRIVER_ID": {"type": "text", "synonyms": ["conductor", "chofer", "operador", "driver", "empleado"]}
+            },
+            "ROUTE": {
+                "ROUTE_NAME": {"type": "text", "synonyms": ["ruta", "origen", "destino", "trayecto", "tramo"]}
             },
             "CUSTOMER": {
                 "CUSTOMER_NAME": {"type": "text", "synonyms": ["cliente", "empresa", "cuenta", "razon social"]}
@@ -125,7 +129,6 @@ class GenesisDataUnderstanding:
             workbook_result["sheets_analysis"][sheet_name] = sheet_analysis
         return workbook_result
 
-
 # =================================================================
 # 🛡️ DATA QUALITY vs ANALYTICAL CONFIDENCE
 # =================================================================
@@ -153,9 +156,8 @@ class DataQualityGate:
             "metricas": {"unicidad": unicidad, "completitud": completitud}
         }
 
-
 # =================================================================
-# ⚖️ NIVEL 3: MOTORES EMPRESARIALES (EVIDENCE, IMPACT, ACTION)
+# ⚖️ MOTORES EMPRESARIALES (EVIDENCE, IMPACT, ACTION)
 # =================================================================
 class EvidenceEngine:
     @staticmethod
@@ -173,31 +175,26 @@ class EvidenceEngine:
 class ImpactEngine:
     @staticmethod
     def project(impact_por_evento: float, eventos_mes: int = 4):
-        # Proyección asumiendo frecuencia promedio B2B. Luego se conectará a BD histórica.
         impacto_mensual = impact_por_evento * eventos_mes
-        impacto_anual = impacto_mensual * 12
         return {
             "impacto_directo": round(impact_por_evento, 2),
             "proyeccion_mensual": round(impacto_mensual, 2),
-            "proyeccion_anual": round(impacto_anual, 2)
+            "proyeccion_anual": round(impacto_mensual * 12, 2)
         }
 
 class ActionEngine:
     @staticmethod
     def route(anom_type: str, vehiculo: str):
         if anom_type == "DUPLICADO":
-            return {"departamento": "Contabilidad", "accion": "Revisar facturación doble en ERP para no emitir pagos/cobros duplicados.", "urgencia": "ALTA"}
+            return {"departamento": "Contabilidad", "accion": "Revisar facturación doble en ERP.", "urgencia": "ALTA"}
         elif anom_type == "MARGEN_NEGATIVO":
-            return {"departamento": "Pricing/Ventas", "accion": "Auditar estructura tarifaria o negociar ajuste de tarifa con el cliente.", "urgencia": "MEDIA"}
+            return {"departamento": "Pricing/Ventas", "accion": "Auditar tarifa pactada con el cliente.", "urgencia": "MEDIA"}
         elif anom_type == "OUTLIER":
-            return {"departamento": "Operaciones", "accion": f"Auditar viaje atípico en vehículo {vehiculo} para descartar fraude o error de digitación.", "urgencia": "ALTA"}
-        elif anom_type == "MARGEN_GLOBAL_BAJO":
-            return {"departamento": "Dirección", "accion": "Revisión general de costos directos (Combustible/Peajes) vs Tarifario.", "urgencia": "CRÍTICA"}
-        return {"departamento": "Auditoría", "accion": "Revisión general del hallazgo.", "urgencia": "BAJA"}
-
+            return {"departamento": "Operaciones", "accion": f"Auditar viaje atípico en vehículo {vehiculo}.", "urgencia": "ALTA"}
+        return {"departamento": "Auditoría", "accion": "Revisión general.", "urgencia": "BAJA"}
 
 # =================================================================
-# 💸 FASE 2: MOTOR ECONÓMICO RELACIONAL DINÁMICO (Orquestador)
+# 💸 MOTOR ECONÓMICO RELACIONAL DINÁMICO
 # =================================================================
 class EconomicRuleEngine:
     def _to_numeric(self, series: pd.Series) -> pd.Series:
@@ -234,7 +231,7 @@ class EconomicRuleEngine:
         if base_df is None: base_name, base_df = processed.pop(0)
 
         for name, df in processed:
-            common_keys = list(set(base_df.columns) & set(df.columns) & {"TRIP_ID", "VEHICLE_ID"})
+            common_keys = list(set(base_df.columns) & set(df.columns) & {"TRIP_ID", "VEHICLE_ID", "DRIVER_ID"})
             join_key = "TRIP_ID" if "TRIP_ID" in common_keys else ("VEHICLE_ID" if "VEHICLE_ID" in common_keys else None)
             if join_key is None:
                 warnings.append(f"La hoja '{name}' no comparte llave. Omitida.")
@@ -251,7 +248,6 @@ class EconomicRuleEngine:
         has_vehicle = "VEHICLE_ID" in master_df.columns
         has_trip_id = "TRIP_ID" in master_df.columns
 
-        min_margin_target = config.get("min_margin_percent", 10.0)
         allow_neg = bool(config.get("allow_negative_margin", 0))
 
         if has_revenue: master_df["REVENUE"] = self._to_numeric(master_df["REVENUE"]).fillna(0)
@@ -264,7 +260,6 @@ class EconomicRuleEngine:
         dinero_en_riesgo = 0.0
         prioridad = 1
 
-        # 1. Detección de Duplicados
         subset = ["TRIP_ID"] if has_trip_id else None
         dup_mask = master_df.duplicated(subset=subset, keep="first")
         if dup_mask.sum() > 0:
@@ -273,9 +268,7 @@ class EconomicRuleEngine:
             vehiculos_afectados = ", ".join(sorted(set(master_df.loc[dup_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
             
             anomalies.append({
-                "prioridad": prioridad, 
-                "vehiculo": vehiculos_afectados, 
-                "titulo": "Duplicidad Operativa", 
+                "prioridad": prioridad, "vehiculo": vehiculos_afectados, "titulo": "Duplicidad Operativa", 
                 "causa": f"{dup_mask.sum()} registros clonados.", 
                 "evidencia": EvidenceEngine.generate("DUPLICADO", 0, impacto_dup, len(master_df)),
                 "impacto": ImpactEngine.project(impacto_dup),
@@ -283,7 +276,6 @@ class EconomicRuleEngine:
             })
             prioridad += 1
 
-        # 2. Detección de Margen Negativo
         if has_revenue and has_cost and not allow_neg:
             neg_mask = (master_df["COST_FUEL"] > master_df["REVENUE"]) & (master_df["REVENUE"] > 0)
             if neg_mask.sum() > 0:
@@ -292,33 +284,11 @@ class EconomicRuleEngine:
                 vehiculos_neg = ", ".join(sorted(set(master_df.loc[neg_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
                 
                 anomalies.append({
-                    "prioridad": prioridad, 
-                    "vehiculo": vehiculos_neg, 
-                    "titulo": "Margen Negativo (Pérdida Directa)", 
+                    "prioridad": prioridad, "vehiculo": vehiculos_neg, "titulo": "Margen Negativo (Pérdida Directa)", 
                     "causa": f"{neg_mask.sum()} viajes en pérdida.", 
                     "evidencia": EvidenceEngine.generate("MARGEN_NEGATIVO", total_ingresos / len(master_df), impacto_neg, len(master_df)),
                     "impacto": ImpactEngine.project(impacto_neg),
                     "accion": ActionEngine.route("MARGEN_NEGATIVO", vehiculos_neg)
-                })
-                prioridad += 1
-
-        # 3. Detección Outliers Estadísticos
-        if has_revenue and master_df["REVENUE"].std(ddof=0) > 0:
-            mean_rev = master_df["REVENUE"].mean()
-            z_scores = (master_df["REVENUE"] - mean_rev) / master_df["REVENUE"].std(ddof=0)
-            outlier_mask = z_scores.abs() > 3
-            if outlier_mask.sum() > 0:
-                impacto_out = float(master_df.loc[outlier_mask, "REVENUE"].sum())
-                vehiculos_out = ", ".join(sorted(set(master_df.loc[outlier_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
-                
-                anomalies.append({
-                    "prioridad": prioridad, 
-                    "vehiculo": vehiculos_out, 
-                    "titulo": "Ingresos Atípicos (Outliers)", 
-                    "causa": f"Desviación superior a 3 Sigmas.", 
-                    "evidencia": EvidenceEngine.generate("OUTLIER", mean_rev, impacto_out, len(master_df)),
-                    "impacto": ImpactEngine.project(impacto_out, 1), # Outliers proyectan menos mensual
-                    "accion": ActionEngine.route("OUTLIER", vehiculos_out)
                 })
                 prioridad += 1
 
@@ -328,18 +298,20 @@ class EconomicRuleEngine:
         if not has_cost: warnings.append("Falta COST_FUEL.")
         return financial_results, anomalies, warnings
 
-
 # =================================================================
-# 🚀 ORQUESTADOR PRINCIPAL (API FASTAPI)
+# 🚀 ORQUESTADOR API (SISTEMA NERVIOSO CENTRAL)
 # =================================================================
-app = FastAPI(title="GENESIS CORE B2B - Nivel 3 Engine")
-
+app = FastAPI(title="GENESIS CORE B2B - Central Brain Engine")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 def _read_excel_or_csv_multisheet(filename: str, file_bytes: bytes) -> dict:
     buf = io.BytesIO(file_bytes)
     if filename.lower().endswith(".csv"): return {"Hoja1": pd.read_csv(buf)}
     return pd.read_excel(buf, sheet_name=None)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "brain_version": "0.6.4-Nivel3", "timestamp": datetime.datetime.utcnow().isoformat()}
 
 @app.post("/api/v1/data-understanding")
 async def data_understanding(file: UploadFile = File(...)):
@@ -350,17 +322,35 @@ async def data_understanding(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-@app.get("/api/v1/tenant-config")
-async def get_tenant_config(x_tenant_id: str = Header(default="DEFAULT_TENANT")):
+@app.get("/api/v1/audit-history")
+async def get_audit_history(x_tenant_id: str = Header(default="DEFAULT_TENANT")):
     db = SessionLocal()
     try:
-        cfg = db.query(TenantConfig).filter(TenantConfig.tenant_id == x_tenant_id).first()
-        if not cfg:
-            cfg = TenantConfig(tenant_id=x_tenant_id)
-            db.add(cfg)
-            db.commit()
-            db.refresh(cfg)
-        return {"tenant_id": cfg.tenant_id, "min_margin_percent": cfg.min_margin_percent, "allow_negative_margin": cfg.allow_negative_margin}
+        records = db.query(AuditRecord).filter(AuditRecord.tenant_id == x_tenant_id).order_by(AuditRecord.timestamp.desc()).all()
+        return [{"id": r.id, "filename": r.filename, "timestamp": r.timestamp, "quality_score": r.quality_score, "analytical_confidence": r.analytical_confidence, "financial_results": r.financial_results} for r in records]
+    finally:
+        db.close()
+
+@app.get("/api/v1/action-tasks")
+async def get_action_tasks(status: str = None, x_tenant_id: str = Header(default="DEFAULT_TENANT")):
+    db = SessionLocal()
+    try:
+        query = db.query(ActionTask).filter(ActionTask.tenant_id == x_tenant_id)
+        if status: query = query.filter(ActionTask.status == status)
+        tasks = query.order_by(ActionTask.created_at.desc()).all()
+        return [{"id": t.id, "audit_id": t.audit_id, "department": t.department, "title": t.title, "description": t.description, "financial_impact": t.financial_impact, "status": t.status, "created_at": t.created_at} for t in tasks]
+    finally:
+        db.close()
+
+@app.patch("/api/v1/action-tasks/{task_id}")
+async def update_task_status(task_id: int, new_status: str = Body(..., embed=True), x_tenant_id: str = Header(default="DEFAULT_TENANT")):
+    db = SessionLocal()
+    try:
+        task = db.query(ActionTask).filter(ActionTask.id == task_id, ActionTask.tenant_id == x_tenant_id).first()
+        if not task: raise HTTPException(status_code=404, detail="Tarea no encontrada")
+        task.status = new_status
+        db.commit()
+        return {"status": "success", "task_id": task_id, "updated_status": new_status}
     finally:
         db.close()
 
@@ -390,15 +380,13 @@ async def procesar_matriz(file: UploadFile = File(...), mapping: str = Form(None
 
         db = SessionLocal()
         try:
-            # 1. Guardar Auditoría
             audit_log = AuditRecord(
                 tenant_id=x_tenant_id, filename=file.filename, quality_score=q_metrics["data_quality_score"],
                 analytical_confidence=q_metrics["analytical_confidence"], financial_results=fin_results, anomalies=anomalies
             )
             db.add(audit_log)
-            db.flush() # Obtener ID antes del commit
+            db.flush()
             
-            # 2. Guardar Tareas (Workflow / Action Engine)
             for anom in anomalies:
                 task = ActionTask(
                     tenant_id=x_tenant_id, audit_id=audit_log.id, department=anom["accion"]["departamento"],
@@ -417,7 +405,7 @@ async def procesar_matriz(file: UploadFile = File(...), mapping: str = Form(None
                 "totalIngresos": fin_results["totalIngresos"], "margenGlobal": fin_results["margenGlobal"],
                 "dineroEnRiesgo": fin_results["dineroEnRiesgo"], "totalHallazgos": len(anomalies)
             },
-            "hallazgos": anomalies # Ahora el frontend recibirá Evidencia, Impacto y Acción detallada.
+            "hallazgos": anomalies
         }
     except Exception as e: 
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
