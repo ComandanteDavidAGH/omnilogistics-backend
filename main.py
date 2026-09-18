@@ -1,13 +1,39 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON
+from sqlalchemy.orm import declarative_base, sessionmaker
 import io
 import json
 import pandas as pd
 import numpy as np
 import difflib
+import datetime
 
 # =================================================================
-# 🧠 FASE 1: MOTOR SEMÁNTICO MULTI-HOJA (GENESIS DATA MODEL v0.1)
+# 🗄️ CAPA DE PERSISTENCIA (Base de Datos B2B - Fase Alpha)
+# =================================================================
+DATABASE_URL = "sqlite:///./genesis_b2b.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class AuditRecord(Base):
+    __tablename__ = "audit_records"
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String, index=True) # Aislamiento por cliente
+    filename = Column(String)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    quality_score = Column(Float)
+    analytical_confidence = Column(Float)
+    financial_results = Column(JSON)
+    anomalies = Column(JSON)
+
+# Crea la base de datos si no existe
+Base.metadata.create_all(bind=engine)
+
+
+# =================================================================
+# 🧠 FASE 1: MOTOR SEMÁNTICO MULTI-HOJA
 # =================================================================
 class GenesisDataUnderstanding:
     def __init__(self):
@@ -109,20 +135,41 @@ class GenesisDataUnderstanding:
 
 
 # =================================================================
-# 🛡️ CALIDAD DE DATOS
+# 🛡️ ESCISIÓN: DATA QUALITY vs ANALYTICAL CONFIDENCE
 # =================================================================
 class DataQualityGate:
-    def evaluate(self, df: pd.DataFrame):
-        if df.empty: return {"nivelConfianza": "BAJA", "scoreGlobal": 0, "metricas": {"unicidad": 0, "completitud": 0, "validez": 0}}
+    def evaluate(self, df: pd.DataFrame, dedup_subset=None):
+        if df.empty: return {"nivelConfianza": "BAJA", "scoreGlobal": 0, "metricas": {"unicidad": 0, "completitud": 0}}
+        
+        # 1. DATA QUALITY (Ingeniería estructural)
         total_filas, total_celdas = len(df), df.size
         completitud = float(round((df.notna().sum().sum() / total_celdas) * 100, 1)) if total_celdas > 0 else 0.0
-        unicidad = float(round(((total_filas - df.duplicated().sum()) / total_filas) * 100, 1)) if total_filas > 0 else 0.0
-        score_global = int(round((completitud + unicidad + 100.0) / 3))
-        return {"nivelConfianza": "ALTA" if score_global >= 85 else "MEDIA", "scoreGlobal": score_global, "metricas": {"unicidad": unicidad, "completitud": completitud, "validez": 100.0}}
+        subset = dedup_subset if (dedup_subset and all(c in df.columns for c in dedup_subset)) else None
+        unicidad = float(round(((total_filas - df.duplicated(subset=subset).sum()) / total_filas) * 100, 1)) if total_filas > 0 else 0.0
+        quality_score = float(round((completitud + unicidad) / 2.0, 1))
+
+        # 2. ANALYTICAL CONFIDENCE (Inteligencia de Negocio)
+        # Se penaliza fuertemente si faltan columnas críticas para el cálculo económico
+        columns_present = set(df.columns)
+        confidence_score = 100.0
+        if "TRIP_ID" not in columns_present: confidence_score -= 40.0
+        if "REVENUE" not in columns_present: confidence_score -= 30.0
+        if "COST_FUEL" not in columns_present: confidence_score -= 20.0
+        if "VEHICLE_ID" not in columns_present: confidence_score -= 10.0
+        
+        confidence_score = max(0.0, float(round(confidence_score, 1)))
+
+        return {
+            "scoreGlobal": quality_score, # Mantenido por compatibilidad visual temporal
+            "data_quality_score": quality_score,
+            "analytical_confidence": confidence_score,
+            "nivelConfianza": "ALTA" if confidence_score >= 80 else "MEDIA" if confidence_score >= 50 else "BLOQUEADA",
+            "metricas": {"unicidad": unicidad, "completitud": completitud}
+        }
 
 
 # =================================================================
-# 💸 FASE 2: MOTOR ECONÓMICO RELACIONAL (SOPORTA JOIN MULTI-HOJA)
+# 💸 FASE 2: MOTOR ECONÓMICO RELACIONAL
 # =================================================================
 class EconomicRuleEngine:
     def _to_numeric(self, series: pd.Series) -> pd.Series:
@@ -139,34 +186,49 @@ class EconomicRuleEngine:
                 seen_canonical.add(canonical)
         return df.rename(columns=rename_dict)
 
-    def _merge_sheets(self, dfs_dict: dict, mapping: dict) -> pd.DataFrame:
-        processed_dfs = []
+    def _merge_sheets(self, dfs_dict: dict, mapping: dict):
+        warnings = []
+        processed = []
         for sheet_name, df in dfs_dict.items():
             if df.empty: continue
-            df_renamed = self._rename_to_canonical(df.copy(), mapping)
-            canonical_cols = set(df_renamed.columns).intersection(set(mapping.values()))
-            if canonical_cols: processed_dfs.append(df_renamed)
+            scoped_mapping = mapping.get(sheet_name, {})
+            df_renamed = self._rename_to_canonical(df.copy(), scoped_mapping)
+            canonical_cols = set(df_renamed.columns).intersection(set(scoped_mapping.values()))
+            if canonical_cols:
+                processed.append((sheet_name, df_renamed))
+            else:
+                warnings.append(f"La hoja '{sheet_name}' fue omitida (sin campos canónicos).")
 
-        if not processed_dfs: return pd.DataFrame()
+        if not processed: return pd.DataFrame(), warnings
 
-        base_df = None
-        for i, df in enumerate(processed_dfs):
+        base_name, base_df = None, None
+        for i, (name, df) in enumerate(processed):
             if "TRIP_ID" in df.columns:
-                base_df = processed_dfs.pop(i)
+                base_name, base_df = processed.pop(i)
                 break
-        if base_df is None: base_df = processed_dfs.pop(0)
+        if base_df is None: base_name, base_df = processed.pop(0)
 
-        for df in processed_dfs:
+        for name, df in processed:
             common_keys = list(set(base_df.columns) & set(df.columns) & {"TRIP_ID", "VEHICLE_ID"})
-            if "TRIP_ID" in common_keys:
-                base_df = pd.merge(base_df, df, on="TRIP_ID", how="left", suffixes=("", "_duplicada"))
-            elif "VEHICLE_ID" in common_keys:
-                base_df = pd.merge(base_df, df, on="VEHICLE_ID", how="left", suffixes=("", "_duplicada"))
+            join_key = "TRIP_ID" if "TRIP_ID" in common_keys else ("VEHICLE_ID" if "VEHICLE_ID" in common_keys else None)
 
-        cols_to_keep = [c for c in base_df.columns if not c.endswith('_duplicada')]
-        return base_df[cols_to_keep]
+            if join_key is None:
+                warnings.append(f"La hoja '{name}' no comparte TRIP_ID ni VEHICLE_ID con la base. Omitida.")
+                continue
 
-    def analyze(self, master_df: pd.DataFrame, quality_metrics: dict):
+            if df[join_key].duplicated().any():
+                warnings.append(f"Advertencia: '{join_key}' tiene repetidos en '{name}'. Posible multiplicación de filas.")
+
+            rows_before = len(base_df)
+            base_df = pd.merge(base_df, df, on=join_key, how="left", suffixes=("", f"__dup_{name}"))
+            
+            if len(base_df) > rows_before:
+                warnings.append(f"El cruce con '{name}' aumentó las filas. Verifica duplicados en la llave.")
+
+        cols_to_keep = [c for c in base_df.columns if "__dup_" not in c]
+        return base_df[cols_to_keep], warnings
+
+    def analyze(self, master_df: pd.DataFrame):
         anomalies = []
         has_revenue = "REVENUE" in master_df.columns
         has_cost = "COST_FUEL" in master_df.columns
@@ -190,7 +252,7 @@ class EconomicRuleEngine:
             impacto_dup = float(master_df.loc[dup_mask, "REVENUE"].sum()) if has_revenue else 0.0
             dinero_en_riesgo += impacto_dup
             vehiculos_afectados = ", ".join(sorted(set(master_df.loc[dup_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
-            anomalies.append({"prioridad": prioridad, "vehiculo": vehiculos_afectados, "titulo": "Registros Duplicados Detectados", "causa": f"Se encontraron {n_duplicados} registro(s) duplicado(s).", "accion": "Verificar si corresponden a doble facturación.", "impacto": round(impacto_dup, 2)})
+            anomalies.append({"prioridad": prioridad, "vehiculo": vehiculos_afectados, "titulo": "Duplicidad Operativa", "causa": f"{n_duplicados} registros clonados detectados.", "accion": "Revisar doble facturación.", "impacto": round(impacto_dup, 2)})
             prioridad += 1
 
         if has_revenue and has_cost:
@@ -200,20 +262,20 @@ class EconomicRuleEngine:
                 impacto_neg = float((master_df.loc[negative_margin_mask, "COST_FUEL"] - master_df.loc[negative_margin_mask, "REVENUE"]).sum())
                 dinero_en_riesgo += impacto_neg
                 vehiculos_neg = ", ".join(sorted(set(master_df.loc[negative_margin_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
-                anomalies.append({"prioridad": prioridad, "vehiculo": vehiculos_neg, "titulo": "Viajes con Margen Negativo", "causa": f"{n_negativos} viaje(s) tienen un costo de combustible mayor al ingreso.", "accion": "Revisar tarifa pactada.", "impacto": round(impacto_neg, 2)})
+                anomalies.append({"prioridad": prioridad, "vehiculo": vehiculos_neg, "titulo": "Margen Negativo (Pérdida Directa)", "causa": f"{n_negativos} viajes costaron más en diésel de lo que facturaron.", "accion": "Revisar tarifa o eficiencia.", "impacto": round(impacto_neg, 2)})
                 prioridad += 1
 
         financial_results = {"totalIngresos": round(total_ingresos, 2), "totalCostos": round(total_costos, 2), "margenGlobal": margen_global, "dineroEnRiesgo": round(dinero_en_riesgo, 2)}
         warnings = []
-        if not has_revenue: warnings.append("No se identificó REVENUE.")
-        if not has_cost: warnings.append("No se identificó COST_FUEL.")
+        if not has_revenue: warnings.append("Falta REVENUE: Ingresos no calculados.")
+        if not has_cost: warnings.append("Falta COST_FUEL: Margen no calculado.")
         return financial_results, anomalies, warnings
 
 
 # =================================================================
 # 🚀 ORQUESTADOR PRINCIPAL (API FASTAPI)
 # =================================================================
-app = FastAPI(title="GENESIS CORE B2B - Economic Intelligence Engine")
+app = FastAPI(title="GENESIS CORE B2B - Fase Alpha")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -227,38 +289,57 @@ async def data_understanding(file: UploadFile = File(...)):
     try:
         file_bytes = await file.read()
         dfs_dict = _read_excel_or_csv_multisheet(file.filename, file_bytes)
-        motor_semantico = GenesisDataUnderstanding()
-        return motor_semantico.analyze_workbook(dfs_dict)
+        return GenesisDataUnderstanding().analyze_workbook(dfs_dict)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en Data Understanding: {str(e)}")
 
-# AQUI ESTA EL CAMBIO CRUCIAL QUE NO SE APLICÓ LA VEZ PASADA
 @app.post("/api/procesar-matriz")
-async def procesar_matriz(file: UploadFile = File(...), mapping: str = Form(None)):
+async def procesar_matriz(
+    file: UploadFile = File(...), 
+    mapping: str = Form(None),
+    x_tenant_id: str = Header(default="DEFAULT_TENANT") # Aislamiento Multi-Tenant
+):
     try:
         file_bytes = await file.read()
-        # LEEMOS TODAS LAS HOJAS
         dfs_dict = _read_excel_or_csv_multisheet(file.filename, file_bytes)
 
-        if mapping:
-            try: mapping_dict = json.loads(mapping)
-            except json.JSONDecodeError: raise HTTPException(status_code=400, detail="El campo 'mapping' no es JSON.")
-        else:
-            mapping_dict = {}
+        mapping_dict = json.loads(mapping) if mapping else {}
 
         eco_engine = EconomicRuleEngine()
-        
-        # CRUZAMOS LAS HOJAS EN UNA MATRIZ MAESTRA
-        master_df = eco_engine._merge_sheets(dfs_dict, mapping_dict)
-        quality = DataQualityGate()
-        q_metrics = quality.evaluate(master_df)
-        fin_results, anomalies, warnings = eco_engine.analyze(master_df, q_metrics)
+        master_df, merge_warnings = eco_engine._merge_sheets(dfs_dict, mapping_dict)
+
+        # Prueba de Vida (Preview del JOIN para el frontend)
+        preview_data = master_df.head(5).fillna("").to_dict(orient="records") if not master_df.empty else []
+
+        quality_gate = DataQualityGate()
+        dedup_key = ["TRIP_ID"] if "TRIP_ID" in master_df.columns else None
+        q_metrics = quality_gate.evaluate(master_df, dedup_subset=dedup_key)
+
+        fin_results, anomalies, analysis_warnings = eco_engine.analyze(master_df)
+
+        # Persistencia en Base de Datos (Memoria Institucional)
+        db = SessionLocal()
+        try:
+            audit_log = AuditRecord(
+                tenant_id=x_tenant_id,
+                filename=file.filename,
+                quality_score=q_metrics["data_quality_score"],
+                analytical_confidence=q_metrics["analytical_confidence"],
+                financial_results=fin_results,
+                anomalies=anomalies
+            )
+            db.add(audit_log)
+            db.commit()
+        finally:
+            db.close()
 
         return {
             "status": "success",
+            "tenant_id": x_tenant_id,
             "calidad_datos": q_metrics,
             "mapeo_utilizado": mapping_dict,
-            "advertencias": warnings,
+            "advertencias": merge_warnings + analysis_warnings,
+            "preview_join": preview_data, # Retorno para futura validación visual
             "analisis": {
                 "filasAnalizadas": len(master_df),
                 "totalIngresos": fin_results["totalIngresos"],
@@ -269,5 +350,5 @@ async def procesar_matriz(file: UploadFile = File(...), mapping: str = Form(None
             },
             "hallazgos": anomalies
         }
-    except HTTPException: raise
-    except Exception as e: raise HTTPException(status_code=500, detail=f"Error procesando la matriz: {str(e)}")
+    except Exception as e: 
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
