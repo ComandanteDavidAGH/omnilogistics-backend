@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -10,7 +10,7 @@ import difflib
 import datetime
 
 # =================================================================
-# 🗄️ CAPA DE PERSISTENCIA (Base de Datos B2B - Fase Alpha)
+# 🗄️ CAPA DE PERSISTENCIA (Base de Datos B2B - Fase Beta)
 # =================================================================
 DATABASE_URL = "sqlite:///./genesis_b2b.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -20,7 +20,7 @@ Base = declarative_base()
 class AuditRecord(Base):
     __tablename__ = "audit_records"
     id = Column(Integer, primary_key=True, index=True)
-    tenant_id = Column(String, index=True) # Aislamiento por cliente
+    tenant_id = Column(String, index=True)
     filename = Column(String)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
     quality_score = Column(Float)
@@ -28,7 +28,13 @@ class AuditRecord(Base):
     financial_results = Column(JSON)
     anomalies = Column(JSON)
 
-# Crea la base de datos si no existe
+class TenantConfig(Base):
+    __tablename__ = "tenant_configs"
+    tenant_id = Column(String, primary_key=True, index=True)
+    min_margin_percent = Column(Float, default=10.0)
+    z_score_threshold = Column(Float, default=3.0)
+    allow_negative_margin = Column(Integer, default=0)
+
 Base.metadata.create_all(bind=engine)
 
 
@@ -141,15 +147,12 @@ class DataQualityGate:
     def evaluate(self, df: pd.DataFrame, dedup_subset=None):
         if df.empty: return {"nivelConfianza": "BAJA", "scoreGlobal": 0, "metricas": {"unicidad": 0, "completitud": 0}}
         
-        # 1. DATA QUALITY (Ingeniería estructural)
         total_filas, total_celdas = len(df), df.size
         completitud = float(round((df.notna().sum().sum() / total_celdas) * 100, 1)) if total_celdas > 0 else 0.0
         subset = dedup_subset if (dedup_subset and all(c in df.columns for c in dedup_subset)) else None
         unicidad = float(round(((total_filas - df.duplicated(subset=subset).sum()) / total_filas) * 100, 1)) if total_filas > 0 else 0.0
         quality_score = float(round((completitud + unicidad) / 2.0, 1))
 
-        # 2. ANALYTICAL CONFIDENCE (Inteligencia de Negocio)
-        # Se penaliza fuertemente si faltan columnas críticas para el cálculo económico
         columns_present = set(df.columns)
         confidence_score = 100.0
         if "TRIP_ID" not in columns_present: confidence_score -= 40.0
@@ -160,7 +163,7 @@ class DataQualityGate:
         confidence_score = max(0.0, float(round(confidence_score, 1)))
 
         return {
-            "scoreGlobal": quality_score, # Mantenido por compatibilidad visual temporal
+            "scoreGlobal": quality_score,
             "data_quality_score": quality_score,
             "analytical_confidence": confidence_score,
             "nivelConfianza": "ALTA" if confidence_score >= 80 else "MEDIA" if confidence_score >= 50 else "BLOQUEADA",
@@ -169,7 +172,7 @@ class DataQualityGate:
 
 
 # =================================================================
-# 💸 FASE 2: MOTOR ECONÓMICO RELACIONAL
+# 💸 FASE 2: MOTOR ECONÓMICO RELACIONAL DINÁMICO
 # =================================================================
 class EconomicRuleEngine:
     def _to_numeric(self, series: pd.Series) -> pd.Series:
@@ -228,12 +231,16 @@ class EconomicRuleEngine:
         cols_to_keep = [c for c in base_df.columns if "__dup_" not in c]
         return base_df[cols_to_keep], warnings
 
-    def analyze(self, master_df: pd.DataFrame):
+    def analyze(self, master_df: pd.DataFrame, config: dict):
         anomalies = []
         has_revenue = "REVENUE" in master_df.columns
         has_cost = "COST_FUEL" in master_df.columns
         has_vehicle = "VEHICLE_ID" in master_df.columns
         has_trip_id = "TRIP_ID" in master_df.columns
+
+        # Parámetros del Motor de Reglas
+        min_margin_target = config.get("min_margin_percent", 10.0)
+        allow_neg = bool(config.get("allow_negative_margin", 0))
 
         if has_revenue: master_df["REVENUE"] = self._to_numeric(master_df["REVENUE"]).fillna(0)
         if has_cost: master_df["COST_FUEL"] = self._to_numeric(master_df["COST_FUEL"]).fillna(0)
@@ -255,7 +262,7 @@ class EconomicRuleEngine:
             anomalies.append({"prioridad": prioridad, "vehiculo": vehiculos_afectados, "titulo": "Duplicidad Operativa", "causa": f"{n_duplicados} registros clonados detectados.", "accion": "Revisar doble facturación.", "impacto": round(impacto_dup, 2)})
             prioridad += 1
 
-        if has_revenue and has_cost:
+        if has_revenue and has_cost and not allow_neg:
             negative_margin_mask = (master_df["COST_FUEL"] > master_df["REVENUE"]) & (master_df["REVENUE"] > 0)
             n_negativos = int(negative_margin_mask.sum())
             if n_negativos > 0:
@@ -264,6 +271,18 @@ class EconomicRuleEngine:
                 vehiculos_neg = ", ".join(sorted(set(master_df.loc[negative_margin_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
                 anomalies.append({"prioridad": prioridad, "vehiculo": vehiculos_neg, "titulo": "Margen Negativo (Pérdida Directa)", "causa": f"{n_negativos} viajes costaron más en diésel de lo que facturaron.", "accion": "Revisar tarifa o eficiencia.", "impacto": round(impacto_neg, 2)})
                 prioridad += 1
+
+        # Detección de desviación contra el objetivo de margen del Tenant
+        if has_revenue and has_cost and margen_global is not None:
+            if margen_global < min_margin_target:
+                anomalies.append({
+                    "prioridad": prioridad,
+                    "vehiculo": "GLOBAL",
+                    "titulo": "Margen Operativo Bajo Objetivo",
+                    "causa": f"El margen global ({margen_global}%) está por debajo del objetivo del cliente ({min_margin_target}%).",
+                    "accion": "Ajustar estructura tarifaria global o auditar sobrecostos de combustible.",
+                    "impacto": round(total_ingresos * ((min_margin_target - margen_global) / 100), 2)
+                })
 
         financial_results = {"totalIngresos": round(total_ingresos, 2), "totalCostos": round(total_costos, 2), "margenGlobal": margen_global, "dineroEnRiesgo": round(dinero_en_riesgo, 2)}
         warnings = []
@@ -275,7 +294,7 @@ class EconomicRuleEngine:
 # =================================================================
 # 🚀 ORQUESTADOR PRINCIPAL (API FASTAPI)
 # =================================================================
-app = FastAPI(title="GENESIS CORE B2B - Fase Alpha")
+app = FastAPI(title="GENESIS CORE B2B - Fase Beta Engine")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -293,11 +312,31 @@ async def data_understanding(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en Data Understanding: {str(e)}")
 
+# Endpoint para consultar o configurar reglas por Tenant
+@app.get("/api/v1/tenant-config")
+async def get_tenant_config(x_tenant_id: str = Header(default="DEFAULT_TENANT")):
+    db = SessionLocal()
+    try:
+        cfg = db.query(TenantConfig).filter(TenantConfig.tenant_id == x_tenant_id).first()
+        if not cfg:
+            cfg = TenantConfig(tenant_id=x_tenant_id)
+            db.add(cfg)
+            db.commit()
+            db.refresh(cfg)
+        return {
+            "tenant_id": cfg.tenant_id,
+            "min_margin_percent": cfg.min_margin_percent,
+            "z_score_threshold": cfg.z_score_threshold,
+            "allow_negative_margin": cfg.allow_negative_margin
+        }
+    finally:
+        db.close()
+
 @app.post("/api/procesar-matriz")
 async def procesar_matriz(
     file: UploadFile = File(...), 
     mapping: str = Form(None),
-    x_tenant_id: str = Header(default="DEFAULT_TENANT") # Aislamiento Multi-Tenant
+    x_tenant_id: str = Header(default="DEFAULT_TENANT")
 ):
     try:
         file_bytes = await file.read()
@@ -305,19 +344,31 @@ async def procesar_matriz(
 
         mapping_dict = json.loads(mapping) if mapping else {}
 
+        # Cargar configuración activa del Tenant desde la BD
+        db = SessionLocal()
+        try:
+            cfg = db.query(TenantConfig).filter(TenantConfig.tenant_id == x_tenant_id).first()
+            tenant_rules = {
+                "min_margin_percent": cfg.min_margin_percent if cfg else 10.0,
+                "z_score_threshold": cfg.z_score_threshold if cfg else 3.0,
+                "allow_negative_margin": cfg.allow_negative_margin if cfg else 0
+            }
+        finally:
+            db.close()
+
         eco_engine = EconomicRuleEngine()
         master_df, merge_warnings = eco_engine._merge_sheets(dfs_dict, mapping_dict)
 
-        # Prueba de Vida (Preview del JOIN para el frontend)
         preview_data = master_df.head(5).fillna("").to_dict(orient="records") if not master_df.empty else []
 
         quality_gate = DataQualityGate()
         dedup_key = ["TRIP_ID"] if "TRIP_ID" in master_df.columns else None
         q_metrics = quality_gate.evaluate(master_df, dedup_subset=dedup_key)
 
-        fin_results, anomalies, analysis_warnings = eco_engine.analyze(master_df)
+        # Análisis ejecutado contra las reglas dinámicas del cliente
+        fin_results, anomalies, analysis_warnings = eco_engine.analyze(master_df, config=tenant_rules)
 
-        # Persistencia en Base de Datos (Memoria Institucional)
+        # Persistencia en Base de Datos
         db = SessionLocal()
         try:
             audit_log = AuditRecord(
@@ -336,10 +387,11 @@ async def procesar_matriz(
         return {
             "status": "success",
             "tenant_id": x_tenant_id,
+            "applied_config": tenant_rules,
             "calidad_datos": q_metrics,
             "mapeo_utilizado": mapping_dict,
             "advertencias": merge_warnings + analysis_warnings,
-            "preview_join": preview_data, # Retorno para futura validación visual
+            "preview_join": preview_data,
             "analisis": {
                 "filasAnalizadas": len(master_df),
                 "totalIngresos": fin_results["totalIngresos"],
