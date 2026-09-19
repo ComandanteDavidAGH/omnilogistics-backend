@@ -5,7 +5,6 @@ import math
 import unicodedata
 import datetime
 import os
-import hashlib
 import pandas as pd
 import numpy as np
 from typing import Any, Optional
@@ -218,7 +217,7 @@ class EconomicRuleEngine:
         }
         return {"financials": financials, "findings": anomalies, "warnings": warnings}
 
-app = FastAPI(title="GENESIS CORE B2B - Unified Engine", version="1.0.3")
+app = FastAPI(title="GENESIS CORE B2B - Unified Engine", version="1.0.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -236,11 +235,11 @@ def _read_workbook_bytes(filename: str, file_bytes: bytes) -> dict:
 
 @app.get("/")
 async def root():
-    return {"system": "GENESIS CORE B2B", "status": "online", "version": "1.0.3-FullPersist"}
+    return {"system": "GENESIS CORE B2B", "status": "online", "version": "1.0.4-Enterprise"}
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "1.0.3-FullPersist", "timestamp": datetime.datetime.utcnow().isoformat()}
+    return {"status": "healthy", "version": "1.0.4-Enterprise", "timestamp": datetime.datetime.utcnow().isoformat()}
 
 @app.post("/api/v1/data-understanding")
 async def data_understanding(file: UploadFile = File(...)):
@@ -324,6 +323,26 @@ async def procesar_matriz(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
+@app.get("/api/v1/audit-records")
+async def get_audit_records(x_tenant_id: str = Header(default="DEFAULT_TENANT")):
+    db = SessionLocal()
+    try:
+        records = db.query(AuditRecord).filter(AuditRecord.tenant_id == x_tenant_id).order_by(AuditRecord.timestamp.desc()).all()
+        return clean_value([
+            {
+                "id": r.id,
+                "filename": r.filename,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "quality_score": r.quality_score,
+                "analytical_confidence": r.analytical_confidence,
+                "financial_results": r.financial_results,
+                "anomalies_count": len(r.anomalies) if r.anomalies else 0
+            }
+            for r in records
+        ])
+    finally:
+        db.close()
+
 @app.get("/api/v1/action-tasks")
 async def get_action_tasks(status: str = None, x_tenant_id: str = Header(default="DEFAULT_TENANT")):
     db = SessionLocal()
@@ -365,7 +384,6 @@ async def update_task_status(
     finally:
         db.close()
 
-# NUEVO ENDPOINT: BORRADO INDIVIDUAL EN POSTGRESQL
 @app.delete("/api/v1/action-tasks/{task_id}")
 async def delete_action_task(
     task_id: int,
@@ -382,7 +400,6 @@ async def delete_action_task(
     finally:
         db.close()
 
-# NUEVO ENDPOINT: PURGA TOTAL EN POSTGRESQL
 @app.delete("/api/v1/action-tasks")
 async def clear_all_action_tasks(
     x_tenant_id: str = Header(default="DEFAULT_TENANT")
@@ -392,25 +409,5 @@ async def clear_all_action_tasks(
         db.query(ActionTask).filter(ActionTask.tenant_id == x_tenant_id).delete()
         db.commit()
         return {"status": "success", "message": "Todas las tareas han sido purgadas."}
-    finally:
-        db.close()
-# ENDPOINT PARA CONSULTAR HISTORIAL DE AUDITORÍAS
-@app.get("/api/v1/audit-records")
-async def get_audit_records(x_tenant_id: str = Header(default="DEFAULT_TENANT")):
-    db = SessionLocal()
-    try:
-        records = db.query(AuditRecord).filter(AuditRecord.tenant_id == x_tenant_id).order_by(AuditRecord.timestamp.desc()).all()
-        return clean_value([
-            {
-                "id": r.id,
-                "filename": r.filename,
-                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-                "quality_score": r.quality_score,
-                "analytical_confidence": r.analytical_confidence,
-                "financial_results": r.financial_results,
-                "anomalies_count": len(r.anomalies) if r.anomalies else 0
-            }
-            for r in records
-        ])
     finally:
         db.close()
