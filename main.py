@@ -13,14 +13,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+import os
+
 # =================================================================
-# 🗄️ CAPA DE PERSISTENCIA (SQLAlchemy)
+# 🗄️ CAPA DE PERSISTENCIA (SQLAlchemy + PostgreSQL / SQLite)
 # =================================================================
-DATABASE_URL = "sqlite:///./genesis_b2b.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+RAW_DB_URL = os.getenv("DATABASE_URL", "sqlite:///./genesis_b2b.db")
+
+# Normalizar la cadena de conexión para compatibilidad con Render/SQLAlchemy 2.0
+if RAW_DB_URL.startswith("postgres://"):
+    DATABASE_URL = RAW_DB_URL.replace("postgres://", "postgresql://", 1)
+else:
+    DATABASE_URL = RAW_DB_URL
+
+connect_args = {"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
 class AuditRecord(Base):
     __tablename__ = "audit_records"
     id = Column(Integer, primary_key=True, index=True)
