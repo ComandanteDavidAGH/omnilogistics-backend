@@ -48,14 +48,6 @@ class TenantConfig(Base):
     z_score_threshold = Column(Float, default=3.5)
     allow_negative_margin = Column(Integer, default=0)
 
-class TenantMapping(Base):
-    __tablename__ = "tenant_mappings"
-    id = Column(Integer, primary_key=True, index=True)
-    tenant_id = Column(String, index=True)
-    signature = Column(String, index=True)
-    mapping_data = Column(JSON)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
-
 class ActionTask(Base):
     __tablename__ = "action_tasks"
     id = Column(Integer, primary_key=True, index=True)
@@ -70,9 +62,6 @@ class ActionTask(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# =================================================================
-# 🧠 MODELO DE DATOS CANÓNICO Y LIMPIEZA
-# =================================================================
 FIELDS = {
     "TRIP_ID": {"entity": "TRIP", "type": "text", "label": "ID de Viaje / Folio", "synonyms": ["viaje", "folio", "ticket", "operacion", "guia", "manifiesto", "id viaje"]},
     "TRIP_DATE": {"entity": "TRIP", "type": "date", "label": "Fecha del Viaje", "synonyms": ["fecha", "salida", "emision", "fecha viaje"]},
@@ -104,9 +93,6 @@ def clean_value(obj):
     if isinstance(obj, (list, tuple, set)): return [clean_value(v) for v in obj]
     return str(obj)
 
-# =================================================================
-# 🧠 MOTOR ANALÍTICO Y COMPONENTES CORE
-# =================================================================
 class GenesisDataUnderstanding:
     def analyze_workbook(self, dfs_dict: dict):
         result = {"status": "success", "sheets_detected": len(dfs_dict), "sheets_analysis": {}, "global_entities": [], "total_records": 0}
@@ -232,10 +218,7 @@ class EconomicRuleEngine:
         }
         return {"financials": financials, "findings": anomalies, "warnings": warnings}
 
-# =================================================================
-# 🚀 API FASTAPI ORQUESTADORA
-# =================================================================
-app = FastAPI(title="GENESIS CORE B2B - Unified Engine", version="1.0.2")
+app = FastAPI(title="GENESIS CORE B2B - Unified Engine", version="1.0.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -251,9 +234,13 @@ def _read_workbook_bytes(filename: str, file_bytes: bytes) -> dict:
         return {"Hoja1": pd.read_csv(buf)}
     return pd.read_excel(buf, sheet_name=None)
 
+@app.get("/")
+async def root():
+    return {"system": "GENESIS CORE B2B", "status": "online", "version": "1.0.3-FullPersist"}
+
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "1.0.2-FullPersist", "timestamp": datetime.datetime.utcnow().isoformat()}
+    return {"status": "healthy", "version": "1.0.3-FullPersist", "timestamp": datetime.datetime.utcnow().isoformat()}
 
 @app.post("/api/v1/data-understanding")
 async def data_understanding(file: UploadFile = File(...)):
@@ -296,7 +283,6 @@ async def procesar_matriz(
             analysis_output = rule_engine.analyze(master_df, config=tenant_rules)
             all_warnings = merge_warnings + analysis_output["warnings"]
 
-            # PERSISTENCIA EN POSTGRESQL
             audit_log = AuditRecord(
                 tenant_id=x_tenant_id,
                 filename=file.filename,
@@ -376,5 +362,35 @@ async def update_task_status(
         task.status = new_status
         db.commit()
         return {"status": "success", "task_id": task_id, "updated_status": new_status}
+    finally:
+        db.close()
+
+# NUEVO ENDPOINT: BORRADO INDIVIDUAL EN POSTGRESQL
+@app.delete("/api/v1/action-tasks/{task_id}")
+async def delete_action_task(
+    task_id: int,
+    x_tenant_id: str = Header(default="DEFAULT_TENANT")
+):
+    db = SessionLocal()
+    try:
+        task = db.query(ActionTask).filter(ActionTask.id == task_id, ActionTask.tenant_id == x_tenant_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail=f"La tarea con ID {task_id} no existe.")
+        db.delete(task)
+        db.commit()
+        return {"status": "success", "message": f"Tarea {task_id} eliminada correctamente."}
+    finally:
+        db.close()
+
+# NUEVO ENDPOINT: PURGA TOTAL EN POSTGRESQL
+@app.delete("/api/v1/action-tasks")
+async def clear_all_action_tasks(
+    x_tenant_id: str = Header(default="DEFAULT_TENANT")
+):
+    db = SessionLocal()
+    try:
+        db.query(ActionTask).filter(ActionTask.tenant_id == x_tenant_id).delete()
+        db.commit()
+        return {"status": "success", "message": "Todas las tareas han sido purgadas."}
     finally:
         db.close()
