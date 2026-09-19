@@ -4,23 +4,22 @@ import re
 import math
 import unicodedata
 import datetime
+import os
+import hashlib
 import pandas as pd
 import numpy as np
-from typing import Any
+from typing import Any, Optional
 from fastapi import FastAPI, UploadFile, File, Form, Header, Request, HTTPException, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-import os
-
 # =================================================================
 # 🗄️ CAPA DE PERSISTENCIA (SQLAlchemy + PostgreSQL / SQLite)
 # =================================================================
 RAW_DB_URL = os.getenv("DATABASE_URL", "sqlite:///./genesis_b2b.db")
 
-# Normalizar la cadena de conexión para compatibilidad con Render/SQLAlchemy 2.0
 if RAW_DB_URL.startswith("postgres://"):
     DATABASE_URL = RAW_DB_URL.replace("postgres://", "postgresql://", 1)
 else:
@@ -30,6 +29,7 @@ connect_args = {"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
 class AuditRecord(Base):
     __tablename__ = "audit_records"
     id = Column(Integer, primary_key=True, index=True)
@@ -187,14 +187,11 @@ class EconomicRuleEngine:
             
         cols_to_keep = [c for c in base_df.columns if "__dup_" not in c]
         merged = base_df[cols_to_keep]
-        # Desduplicar nombres de columnas si hubo colisiones en el join
         merged = merged.loc[:, ~merged.columns.duplicated()].copy()
         return merged, warnings
 
     def analyze(self, master_df: pd.DataFrame, config: dict):
         anomalies, warnings = [], []
-        
-        # Garantizar que no existan columnas duplicadas con el mismo nombre
         master_df = master_df.loc[:, ~master_df.columns.duplicated()].copy()
         
         target_cols = ["REVENUE", "COST_FUEL", "COST_TOLL", "COST_MAINT", "COST_DRIVER", "COST_OTHER", "COST_TOTAL"]
@@ -214,7 +211,6 @@ class EconomicRuleEngine:
         margen = round(((tot_rev - tot_cost) / tot_rev) * 100, 2) if (has_rev and tot_rev > 0) else None
         dinero_riesgo = 0.0
         
-        # Detección de Margen Negativo
         if has_rev and cost_cols:
             master_df["_TOTAL_COST"] = master_df[cost_cols].sum(axis=1)
             neg_mask = (master_df["_TOTAL_COST"] > master_df["REVENUE"]) & (master_df["REVENUE"] > 0)
@@ -239,7 +235,7 @@ class EconomicRuleEngine:
 # =================================================================
 # 🚀 API FASTAPI ORQUESTADORA
 # =================================================================
-app = FastAPI(title="GENESIS CORE B2B - Unified Engine", version="1.0.0")
+app = FastAPI(title="GENESIS CORE B2B - Unified Engine", version="1.0.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -257,7 +253,7 @@ def _read_workbook_bytes(filename: str, file_bytes: bytes) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "1.0.1-FixDuplicatedCols", "timestamp": datetime.datetime.utcnow().isoformat()}
+    return {"status": "healthy", "version": "1.0.2-FullPersist", "timestamp": datetime.datetime.utcnow().isoformat()}
 
 @app.post("/api/v1/data-understanding")
 async def data_understanding(file: UploadFile = File(...)):
@@ -296,22 +292,89 @@ async def procesar_matriz(
         try:
             cfg = db.query(TenantConfig).filter(TenantConfig.tenant_id == x_tenant_id).first()
             tenant_rules = {"min_margin_percent": cfg.min_margin_percent if cfg else 10.0}
+
+            analysis_output = rule_engine.analyze(master_df, config=tenant_rules)
+            all_warnings = merge_warnings + analysis_output["warnings"]
+
+            # PERSISTENCIA EN POSTGRESQL
+            audit_log = AuditRecord(
+                tenant_id=x_tenant_id,
+                filename=file.filename,
+                quality_score=q_metrics["data_quality_score"],
+                analytical_confidence=q_metrics["analytical_confidence"],
+                financial_results=analysis_output["financials"],
+                anomalies=analysis_output["findings"]
+            )
+            db.add(audit_log)
+            db.flush()
+
+            for f in analysis_output["findings"]:
+                task = ActionTask(
+                    tenant_id=x_tenant_id,
+                    audit_id=audit_log.id,
+                    department=f["accion"]["departamento"],
+                    title=f["titulo"],
+                    description=f["accion"]["accion"],
+                    financial_impact=f["impacto"]["impacto_directo"]
+                )
+                db.add(task)
+
+            db.commit()
+
+            preview_data = master_df.head(5).fillna("").to_dict(orient="records") if not master_df.empty else []
+
+            return clean_value({
+                "status": "success",
+                "tenant_id": x_tenant_id,
+                "calidad_datos": q_metrics,
+                "advertencias": all_warnings,
+                "preview_join": preview_data,
+                "financials": analysis_output["financials"],
+                "findings": analysis_output["findings"]
+            })
         finally:
             db.close()
 
-        analysis_output = rule_engine.analyze(master_df, config=tenant_rules)
-        all_warnings = merge_warnings + analysis_output["warnings"]
-
-        preview_data = master_df.head(5).fillna("").to_dict(orient="records") if not master_df.empty else []
-
-        return clean_value({
-            "status": "success",
-            "tenant_id": x_tenant_id,
-            "calidad_datos": q_metrics,
-            "advertencias": all_warnings,
-            "preview_join": preview_data,
-            "financials": analysis_output["financials"],
-            "findings": analysis_output["findings"]
-        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+@app.get("/api/v1/action-tasks")
+async def get_action_tasks(status: str = None, x_tenant_id: str = Header(default="DEFAULT_TENANT")):
+    db = SessionLocal()
+    try:
+        query = db.query(ActionTask).filter(ActionTask.tenant_id == x_tenant_id)
+        if status:
+            query = query.filter(ActionTask.status == status)
+        tasks = query.order_by(ActionTask.created_at.desc()).all()
+        return clean_value([
+            {
+                "id": t.id,
+                "audit_id": t.audit_id,
+                "department": t.department,
+                "title": t.title,
+                "description": t.description,
+                "financial_impact": t.financial_impact,
+                "status": t.status,
+                "created_at": t.created_at.isoformat() if t.created_at else None
+            }
+            for t in tasks
+        ])
+    finally:
+        db.close()
+
+@app.patch("/api/v1/action-tasks/{task_id}")
+async def update_task_status(
+    task_id: int,
+    new_status: str = Body(..., embed=True),
+    x_tenant_id: str = Header(default="DEFAULT_TENANT")
+):
+    db = SessionLocal()
+    try:
+        task = db.query(ActionTask).filter(ActionTask.id == task_id, ActionTask.tenant_id == x_tenant_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail=f"La tarea con ID {task_id} no existe.")
+        task.status = new_status
+        db.commit()
+        return {"status": "success", "task_id": task_id, "updated_status": new_status}
+    finally:
+        db.close()
