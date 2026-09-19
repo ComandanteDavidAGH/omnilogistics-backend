@@ -10,7 +10,7 @@ import difflib
 import datetime
 
 # =================================================================
-# 🗄️ PERSISTENCIA (SISTEMA NERVIOSO CENTRAL)
+# 🗄️ PERSISTENCIA Y MEMORIA INSTITUCIONAL
 # =================================================================
 DATABASE_URL = "sqlite:///./genesis_b2b.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -49,8 +49,9 @@ class ActionTask(Base):
 
 Base.metadata.create_all(bind=engine)
 
+
 # =================================================================
-# 🧠 MOTOR SEMÁNTICO (DATA MODEL v0.2 EXPANDIDO)
+# 🧠 MOTOR SEMÁNTICO (DATA MODEL v0.2)
 # =================================================================
 class GenesisDataUnderstanding:
     def __init__(self):
@@ -129,12 +130,13 @@ class GenesisDataUnderstanding:
             workbook_result["sheets_analysis"][sheet_name] = sheet_analysis
         return workbook_result
 
+
 # =================================================================
 # 🛡️ DATA QUALITY vs ANALYTICAL CONFIDENCE
 # =================================================================
 class DataQualityGate:
     def evaluate(self, df: pd.DataFrame, dedup_subset=None):
-        if df.empty: return {"nivelConfianza": "BAJA", "scoreGlobal": 0, "metricas": {"unicidad": 0, "completitud": 0}}
+        if df.empty: return {"nivelConfianza": "BLOQUEADA", "scoreGlobal": 0, "metricas": {"unicidad": 0, "completitud": 0}}
         total_filas, total_celdas = len(df), df.size
         completitud = float(round((df.notna().sum().sum() / total_celdas) * 100, 1)) if total_celdas > 0 else 0.0
         subset = dedup_subset if (dedup_subset and all(c in df.columns for c in dedup_subset)) else None
@@ -156,31 +158,30 @@ class DataQualityGate:
             "metricas": {"unicidad": unicidad, "completitud": completitud}
         }
 
+
 # =================================================================
-# ⚖️ MOTORES EMPRESARIALES (EVIDENCE, IMPACT, ACTION)
+# ⚖️ MOTORES DE EVIDENCIA, IMPACTO Y ACCIÓN (RIGUROSOS)
 # =================================================================
 class EvidenceEngine:
     @staticmethod
-    def generate(anom_type: str, base_val: float, obs_val: float, n_samples: int, contexto_dimensional: str = "Global"):
-        confidence = min(99.0, 50.0 + (n_samples * 2.5)) if n_samples > 0 else 50.0
+    def generate(anom_type: str, base_val: float, obs_val: float, n_samples: int, contexto: str = "Global"):
         desviacion = round(((obs_val - base_val) / base_val) * 100, 1) if base_val > 0 else 0.0
         return {
-            "segmento_analizado": contexto_dimensional,
+            "segmento_analizado": contexto,
             "linea_base": round(base_val, 2),
             "valor_observado": round(obs_val, 2),
             "desviacion_pct": desviacion,
-            "muestra_comparable": n_samples,
-            "confianza_estadistica_pct": round(confidence, 1)
+            "muestra_observada": n_samples,
+            "nivel_evidencia": "SUFICIENTE" if n_samples >= 3 else "MUESTRA_INSUFICIENTE"
         }
 
 class ImpactEngine:
     @staticmethod
-    def project(impact_por_evento: float, eventos_mes: int = 4):
-        impacto_mensual = impact_por_evento * eventos_mes
+    def project(impact_directo: float, tiene_historico: bool = False):
         return {
-            "impacto_directo": round(impact_por_evento, 2),
-            "proyeccion_mensual": round(impacto_mensual, 2),
-            "proyeccion_anual": round(impacto_mensual * 12, 2)
+            "impacto_directo": round(impact_directo, 2),
+            "requiere_seguimiento": True,
+            "nota": "Impacto directo observado en muestra. Proyecciones requieren histórico de frecuencia."
         }
 
 class ActionEngine:
@@ -191,20 +192,21 @@ class ActionEngine:
         elif anom_type == "MARGEN_NEGATIVO":
             return {"departamento": "Pricing/Ventas", "accion": f"Auditar tarifa vs gasto directo en el segmento: {contexto}.", "urgencia": "MEDIA"}
         elif anom_type == "OUTLIER_CONTEXTUAL":
-            return {"departamento": "Operaciones", "accion": f"Auditar viaje atípico en {vehiculo} (Desviación dentro del segmento {contexto}).", "urgencia": "ALTA"}
-        return {"departamento": "Auditoría", "accion": "Revisión general.", "urgencia": "BAJA"}
+            return {"departamento": "Operaciones", "accion": f"Auditar viaje atípico en {vehiculo} ({contexto}).", "urgencia": "ALTA"}
+        return {"departamento": "Auditoría", "accion": "Revisión general de hallazgo.", "urgencia": "BAJA"}
+
 
 # =================================================================
-# 💸 MOTOR ECONÓMICO RELACIONAL DINÁMICO (Análisis Dimensional)
+# 💸 MOTOR ECONÓMICO RELACIONAL (RECONSTRUIDO CON GUARDARRAÍLES)
 # =================================================================
 class EconomicRuleEngine:
     def _to_numeric(self, series: pd.Series) -> pd.Series:
         cleaned = series.astype(str).str.replace(r'[$,\s]', '', regex=True)
         return pd.to_numeric(cleaned, errors='coerce')
 
-    def _rename_to_canonical(self, df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
+    def _rename_to_canonical(self, df: pd.DataFrame, scoped_mapping: dict) -> pd.DataFrame:
         rename_dict, seen_canonical = {}, set()
-        for original_col, canonical in mapping.items():
+        for original_col, canonical in scoped_mapping.items():
             if not canonical or canonical == "UNKNOWN": continue
             if canonical in seen_canonical: continue
             if original_col in df.columns:
@@ -214,47 +216,60 @@ class EconomicRuleEngine:
 
     def _merge_sheets(self, dfs_dict: dict, mapping: dict):
         warnings, processed = [], []
+        
         for sheet_name, df in dfs_dict.items():
             if df.empty: continue
             scoped_mapping = mapping.get(sheet_name, {})
             df_renamed = self._rename_to_canonical(df.copy(), scoped_mapping)
             canonical_cols = set(df_renamed.columns).intersection(set(scoped_mapping.values()))
-            if canonical_cols: processed.append((sheet_name, df_renamed))
-            else: warnings.append(f"La hoja '{sheet_name}' fue omitida (sin campos canónicos).")
+            if canonical_cols:
+                processed.append((sheet_name, df_renamed))
+            else:
+                warnings.append(f"La hoja '{sheet_name}' fue omitida porque no aportó ningún campo canónico asignado.")
 
-        if not processed: return pd.DataFrame(), warnings
+        if not processed:
+            return pd.DataFrame(), warnings
 
         base_name, base_df = None, None
         for i, (name, df) in enumerate(processed):
             if "TRIP_ID" in df.columns:
                 base_name, base_df = processed.pop(i)
                 break
-        if base_df is None: base_name, base_df = processed.pop(0)
+        if base_df is None: 
+            base_name, base_df = processed.pop(0)
 
         for name, df in processed:
             common_keys = list(set(base_df.columns) & set(df.columns) & {"TRIP_ID", "VEHICLE_ID", "DRIVER_ID"})
             join_key = "TRIP_ID" if "TRIP_ID" in common_keys else ("VEHICLE_ID" if "VEHICLE_ID" in common_keys else None)
+
             if join_key is None:
-                warnings.append(f"La hoja '{name}' no comparte llave. Omitida.")
+                warnings.append(f"La hoja '{name}' no comparte TRIP_ID ni VEHICLE_ID con '{base_name}'; sus datos NO se cruzaron.")
                 continue
+
+            if df[join_key].duplicated().any():
+                warnings.append(f"La llave '{join_key}' tiene valores repetidos en la hoja '{name}'. El cruce podría multiplicar filas.")
+
+            rows_before = len(base_df)
             base_df = pd.merge(base_df, df, on=join_key, how="left", suffixes=("", f"__dup_{name}"))
             
+            if len(base_df) > rows_before:
+                warnings.append(f"El cruce con '{name}' aumentó las filas de {rows_before} a {len(base_df)}. Se detectaron duplicados en la llave de cruce.")
+
+        dropped_cols = [c for c in base_df.columns if "__dup_" in c]
+        if dropped_cols:
+            warnings.append(f"Se descartaron columnas duplicadas post-join: {', '.join(dropped_cols)}.")
+
         cols_to_keep = [c for c in base_df.columns if "__dup_" not in c]
         return base_df[cols_to_keep], warnings
 
     def analyze(self, master_df: pd.DataFrame, config: dict):
         anomalies = []
-        
         has_revenue = "REVENUE" in master_df.columns
         has_cost = "COST_FUEL" in master_df.columns
         has_vehicle = "VEHICLE_ID" in master_df.columns
         has_trip_id = "TRIP_ID" in master_df.columns
 
-        # INTELIGENCIA DIMENSIONAL: Buscar campos de segmentación
-        dimensions = []
-        if "ROUTE_NAME" in master_df.columns: dimensions.append("ROUTE_NAME")
-        if "CUSTOMER_NAME" in master_df.columns: dimensions.append("CUSTOMER_NAME")
-
+        dimensions = [d for d in ["ROUTE_NAME", "CUSTOMER_NAME"] if d in master_df.columns]
         allow_neg = bool(config.get("allow_negative_margin", 0))
 
         if has_revenue: master_df["REVENUE"] = self._to_numeric(master_df["REVENUE"]).fillna(0)
@@ -267,7 +282,7 @@ class EconomicRuleEngine:
         dinero_en_riesgo = 0.0
         prioridad = 1
 
-        # 1. Duplicidad Operativa
+        # 1. Duplicados
         subset = ["TRIP_ID"] if has_trip_id else None
         dup_mask = master_df.duplicated(subset=subset, keep="first")
         if dup_mask.sum() > 0:
@@ -277,94 +292,80 @@ class EconomicRuleEngine:
             
             anomalies.append({
                 "prioridad": prioridad, "vehiculo": vehiculos_afectados, "titulo": "Duplicidad Operativa", 
-                "causa": f"{dup_mask.sum()} registros clonados.", 
-                "evidencia": EvidenceEngine.generate("DUPLICADO", 0, impacto_dup, len(master_df), "Global"),
+                "causa": f"Se encontraron {dup_mask.sum()} registros duplicados en la llave primaria.", 
+                "evidencia": EvidenceEngine.generate("DUPLICADO", 0, impacto_dup, int(dup_mask.sum()), "Global"),
                 "impacto": ImpactEngine.project(impacto_dup),
                 "accion": ActionEngine.route("DUPLICADO", vehiculos_afectados)
             })
             prioridad += 1
 
-        # 2. Margen Negativo Contextual
+        # 2. Margen Negativo
         if has_revenue and has_cost and not allow_neg:
             neg_mask = (master_df["COST_FUEL"] > master_df["REVENUE"]) & (master_df["REVENUE"] > 0)
             if neg_mask.sum() > 0:
-                for idx, row in master_df[neg_mask].iterrows():
-                    impacto_neg = float(row["COST_FUEL"] - row["REVENUE"])
-                    dinero_en_riesgo += impacto_neg
-                    vehiculo = str(row.get("VEHICLE_ID", "N/D"))
-                    
-                    # Extraer contexto si existe
-                    contexto_str = "Global"
-                    if dimensions:
-                        contexto_str = " | ".join([f"{dim}: {row[dim]}" for dim in dimensions if pd.notna(row[dim])])
-
-                    anomalies.append({
-                        "prioridad": prioridad, "vehiculo": vehiculo, "titulo": "Margen Negativo Detectado", 
-                        "causa": f"Viaje costó más en diésel (${row['COST_FUEL']:,.2f}) que el ingreso facturado (${row['REVENUE']:,.2f}).", 
-                        "evidencia": EvidenceEngine.generate("MARGEN_NEGATIVO", float(row['REVENUE']), float(row['COST_FUEL']), 1, contexto_str),
-                        "impacto": ImpactEngine.project(impacto_neg),
-                        "accion": ActionEngine.route("MARGEN_NEGATIVO", vehiculo, contexto_str)
-                    })
-                    prioridad += 1
-
-        # 3. OUTLIERS CONTEXTUALES (Manzanas con Manzanas)
-        if has_revenue and len(master_df) > 0:
-            if dimensions: # Si hay dimensiones (Ej: Ruta), agrupar.
-                group_key = dimensions
-                # Contar tamaño de muestra por grupo
-                master_df['_GROUP_COUNT'] = master_df.groupby(group_key)['REVENUE'].transform('count')
+                impacto_neg = float((master_df.loc[neg_mask, "COST_FUEL"] - master_df.loc[neg_mask, "REVENUE"]).sum())
+                dinero_en_riesgo += impacto_neg
+                vehiculos_neg = ", ".join(sorted(set(master_df.loc[neg_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
                 
-                # Procesar grupos con suficiente muestra (>= 3)
-                valid_groups = master_df['_GROUP_COUNT'] >= 3
+                anomalies.append({
+                    "prioridad": prioridad, "vehiculo": vehiculos_neg, "titulo": "Margen Negativo (Pérdida Directa)", 
+                    "causa": f"{neg_mask.sum()} viaje(s) tienen un costo de combustible mayor al ingreso facturado.", 
+                    "evidencia": EvidenceEngine.generate("MARGEN_NEGATIVO", total_ingresos / max(1, len(master_df)), impacto_neg, int(neg_mask.sum()), "Global"),
+                    "impacto": ImpactEngine.project(impacto_neg),
+                    "accion": ActionEngine.route("MARGEN_NEGATIVO", vehiculos_neg)
+                })
+                prioridad += 1
+
+        # 3. Outliers Contextuales
+        if has_revenue and len(master_df) > 0:
+            if dimensions:
+                master_df['_GRP_CNT'] = master_df.groupby(dimensions)['REVENUE'].transform('count')
+                valid_groups = master_df['_GRP_CNT'] >= 3
                 if valid_groups.sum() > 0:
-                    master_df.loc[valid_groups, '_CTX_MEAN'] = master_df[valid_groups].groupby(group_key)['REVENUE'].transform('mean')
-                    master_df.loc[valid_groups, '_CTX_STD'] = master_df[valid_groups].groupby(group_key)['REVENUE'].transform('std', ddof=0)
+                    master_df.loc[valid_groups, '_CTX_MEAN'] = master_df[valid_groups].groupby(dimensions)['REVENUE'].transform('mean')
+                    master_df.loc[valid_groups, '_CTX_STD'] = master_df[valid_groups].groupby(dimensions)['REVENUE'].transform('std', ddof=0)
                     master_df.loc[valid_groups, '_CTX_Z'] = (master_df.loc[valid_groups, 'REVENUE'] - master_df.loc[valid_groups, '_CTX_MEAN']) / master_df.loc[valid_groups, '_CTX_STD'].replace(0, np.nan)
                     
                     outlier_mask = valid_groups & (master_df['_CTX_Z'].abs() > 3)
-                    
-                    for idx, row in master_df[outlier_mask].iterrows():
-                        impacto_out = float(row['REVENUE'])
-                        vehiculo = str(row.get("VEHICLE_ID", "N/D"))
-                        contexto_str = " | ".join([f"{dim}: {row[dim]}" for dim in dimensions if pd.notna(row[dim])])
-                        
+                    if outlier_mask.sum() > 0:
+                        impacto_out = float(master_df.loc[outlier_mask, "REVENUE"].sum())
+                        vehiculos_out = ", ".join(sorted(set(master_df.loc[outlier_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
                         anomalies.append({
-                            "prioridad": prioridad, "vehiculo": vehiculo, "titulo": "Ingreso Atípico Contextual", 
-                            "causa": f"El ingreso de este viaje se sale del patrón normal exclusivamente para su segmento.", 
-                            "evidencia": EvidenceEngine.generate("OUTLIER_CONTEXTUAL", float(row['_CTX_MEAN']), impacto_out, int(row['_GROUP_COUNT']), contexto_str),
-                            "impacto": ImpactEngine.project(impacto_out, 1),
-                            "accion": ActionEngine.route("OUTLIER_CONTEXTUAL", vehiculo, contexto_str)
+                            "prioridad": prioridad, "vehiculo": vehiculos_out, "titulo": "Ingresos Atípicos Contextuales", 
+                            "causa": f"Se detectaron {outlier_mask.sum()} registros atípicos dentro de sus segmentos específicos.", 
+                            "evidencia": EvidenceEngine.generate("OUTLIER_CONTEXTUAL", 0, impacto_out, int(outlier_mask.sum()), "Segmentado"),
+                            "impacto": ImpactEngine.project(impacto_out),
+                            "accion": ActionEngine.route("OUTLIER_CONTEXTUAL", vehiculos_out)
                         })
                         prioridad += 1
             else:
-                # Fallback Global (Si el usuario no mapeó Rutas ni Clientes)
-                mean_rev = master_df["REVENUE"].mean()
                 std_rev = master_df["REVENUE"].std(ddof=0)
                 if std_rev > 0:
-                    z_scores = (master_df["REVENUE"] - mean_rev) / std_rev
+                    z_scores = (master_df["REVENUE"] - master_df["REVENUE"].mean()) / std_rev
                     outlier_mask = z_scores.abs() > 3
                     if outlier_mask.sum() > 0:
                         impacto_out = float(master_df.loc[outlier_mask, "REVENUE"].sum())
                         vehiculos_out = ", ".join(sorted(set(master_df.loc[outlier_mask, "VEHICLE_ID"].astype(str)))[:3]) if has_vehicle else "N/D"
                         anomalies.append({
                             "prioridad": prioridad, "vehiculo": vehiculos_out, "titulo": "Ingresos Atípicos Globales", 
-                            "causa": "Desviación superior a 3 Sigmas sobre el global (No se aportaron dimensiones para segmentar).", 
-                            "evidencia": EvidenceEngine.generate("OUTLIER", mean_rev, impacto_out, len(master_df), "Global"),
-                            "impacto": ImpactEngine.project(impacto_out, 1),
+                            "causa": f"Se detectaron {outlier_mask.sum()} registros con desviación superior a 3 Sigmas.", 
+                            "evidencia": EvidenceEngine.generate("OUTLIER", master_df["REVENUE"].mean(), impacto_out, int(outlier_mask.sum()), "Global"),
+                            "impacto": ImpactEngine.project(impacto_out),
                             "accion": ActionEngine.route("OUTLIER", vehiculos_out)
                         })
                         prioridad += 1
 
         financial_results = {"totalIngresos": round(total_ingresos, 2), "totalCostos": round(total_costos, 2), "margenGlobal": margen_global, "dineroEnRiesgo": round(dinero_en_riesgo, 2)}
         warnings = []
-        if not has_revenue: warnings.append("Falta REVENUE.")
-        if not has_cost: warnings.append("Falta COST_FUEL.")
+        if not has_revenue: warnings.append("No se identificó columna REVENUE; ingresos no calculados.")
+        if not has_cost: warnings.append("No se identificó columna COST_FUEL; costos no calculados.")
         return financial_results, anomalies, warnings
 
+
 # =================================================================
-# 🚀 ORQUESTADOR API (SISTEMA NERVIOSO CENTRAL)
+# 🚀 API ORQUESTADORA
 # =================================================================
-app = FastAPI(title="GENESIS CORE B2B - Dimensional Brain")
+app = FastAPI(title="GENESIS CORE B2B - Unified Engine")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 def _read_excel_or_csv_multisheet(filename: str, file_bytes: bytes) -> dict:
@@ -374,7 +375,7 @@ def _read_excel_or_csv_multisheet(filename: str, file_bytes: bytes) -> dict:
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "brain_version": "0.6.5-Dimensional", "timestamp": datetime.datetime.utcnow().isoformat()}
+    return {"status": "healthy", "version": "0.6.6-Unified", "timestamp": datetime.datetime.utcnow().isoformat()}
 
 @app.post("/api/v1/data-understanding")
 async def data_understanding(file: UploadFile = File(...)):
@@ -383,46 +384,20 @@ async def data_understanding(file: UploadFile = File(...)):
         dfs_dict = _read_excel_or_csv_multisheet(file.filename, file_bytes)
         return GenesisDataUnderstanding().analyze_workbook(dfs_dict)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-@app.get("/api/v1/audit-history")
-async def get_audit_history(x_tenant_id: str = Header(default="DEFAULT_TENANT")):
-    db = SessionLocal()
-    try:
-        records = db.query(AuditRecord).filter(AuditRecord.tenant_id == x_tenant_id).order_by(AuditRecord.timestamp.desc()).all()
-        return [{"id": r.id, "filename": r.filename, "timestamp": r.timestamp, "quality_score": r.quality_score, "analytical_confidence": r.analytical_confidence, "financial_results": r.financial_results} for r in records]
-    finally:
-        db.close()
-
-@app.get("/api/v1/action-tasks")
-async def get_action_tasks(status: str = None, x_tenant_id: str = Header(default="DEFAULT_TENANT")):
-    db = SessionLocal()
-    try:
-        query = db.query(ActionTask).filter(ActionTask.tenant_id == x_tenant_id)
-        if status: query = query.filter(ActionTask.status == status)
-        tasks = query.order_by(ActionTask.created_at.desc()).all()
-        return [{"id": t.id, "audit_id": t.audit_id, "department": t.department, "title": t.title, "description": t.description, "financial_impact": t.financial_impact, "status": t.status, "created_at": t.created_at} for t in tasks]
-    finally:
-        db.close()
-
-@app.patch("/api/v1/action-tasks/{task_id}")
-async def update_task_status(task_id: int, new_status: str = Body(..., embed=True), x_tenant_id: str = Header(default="DEFAULT_TENANT")):
-    db = SessionLocal()
-    try:
-        task = db.query(ActionTask).filter(ActionTask.id == task_id, ActionTask.tenant_id == x_tenant_id).first()
-        if not task: raise HTTPException(status_code=404, detail="Tarea no encontrada")
-        task.status = new_status
-        db.commit()
-        return {"status": "success", "task_id": task_id, "updated_status": new_status}
-    finally:
-        db.close()
+        raise HTTPException(status_code=500, detail=f"Error en Data Understanding: {str(e)}")
 
 @app.post("/api/procesar-matriz")
 async def procesar_matriz(file: UploadFile = File(...), mapping: str = Form(None), x_tenant_id: str = Header(default="DEFAULT_TENANT")):
     try:
         file_bytes = await file.read()
         dfs_dict = _read_excel_or_csv_multisheet(file.filename, file_bytes)
-        mapping_dict = json.loads(mapping) if mapping else {}
+        
+        mapping_dict = {}
+        if mapping:
+            try:
+                mapping_dict = json.loads(mapping)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="El parámetro 'mapping' no es un JSON válido.")
 
         db = SessionLocal()
         try:
@@ -453,7 +428,7 @@ async def procesar_matriz(file: UploadFile = File(...), mapping: str = Form(None
             for anom in anomalies:
                 task = ActionTask(
                     tenant_id=x_tenant_id, audit_id=audit_log.id, department=anom["accion"]["departamento"],
-                    title=anom["titulo"], description=anom["accion"]["accion"], financial_impact=anom["impacto"]["proyeccion_anual"]
+                    title=anom["titulo"], description=anom["accion"]["accion"], financial_impact=anom["impacto"]["impacto_directo"]
                 )
                 db.add(task)
             
@@ -465,10 +440,13 @@ async def procesar_matriz(file: UploadFile = File(...), mapping: str = Form(None
             "status": "success", "tenant_id": x_tenant_id, "calidad_datos": q_metrics,
             "advertencias": merge_warnings + analysis_warnings, "preview_join": preview_data,
             "analisis": {
-                "totalIngresos": fin_results["totalIngresos"], "margenGlobal": fin_results["margenGlobal"],
+                "filasAnalizadas": len(master_df), "totalIngresos": fin_results["totalIngresos"],
+                "totalCostos": fin_results["totalCostos"], "margenGlobal": fin_results["margenGlobal"],
                 "dineroEnRiesgo": fin_results["dineroEnRiesgo"], "totalHallazgos": len(anomalies)
             },
             "hallazgos": anomalies
         }
+    except HTTPException:
+        raise
     except Exception as e: 
-        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en motor económico: {str(e)}")
