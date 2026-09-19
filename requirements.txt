@@ -6,3 +6,4 @@ openpyxl
 python-multipart
 python-calamine
 SQLAlchemy
+psycopg2-binary
