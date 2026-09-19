@@ -138,7 +138,6 @@ class GenesisDataUnderstanding:
 class DataQualityGate:
     def evaluate(self, df: pd.DataFrame):
         if df.empty: return {"nivelConfianza": "BLOQUEADA", "bloqueante": True, "data_quality_score": 0.0, "analytical_confidence": 0.0}
-        n_rows = len(df)
         cols = set(df.columns)
         has_rev = "REVENUE" in cols
         has_cost = any(c.startswith("COST_") for c in cols)
@@ -178,18 +177,27 @@ class EconomicRuleEngine:
             base_df = pd.merge(base_df, df, on=join_key, how="left", suffixes=("", f"__dup_{name}"))
             
         cols_to_keep = [c for c in base_df.columns if "__dup_" not in c]
-        return base_df[cols_to_keep], warnings
+        merged = base_df[cols_to_keep]
+        # Desduplicar nombres de columnas si hubo colisiones en el join
+        merged = merged.loc[:, ~merged.columns.duplicated()].copy()
+        return merged, warnings
 
     def analyze(self, master_df: pd.DataFrame, config: dict):
         anomalies, warnings = [], []
-        has_rev = "REVENUE" in master_df.columns
-        has_cost = any(c.startswith("COST_") for c in master_df.columns)
         
+        # Garantizar que no existan columnas duplicadas con el mismo nombre
+        master_df = master_df.loc[:, ~master_df.columns.duplicated()].copy()
+        
+        target_cols = ["REVENUE", "COST_FUEL", "COST_TOLL", "COST_MAINT", "COST_DRIVER", "COST_OTHER", "COST_TOTAL"]
         for col in master_df.columns:
-            if col in ["REVENUE", "COST_FUEL", "COST_TOLL", "COST_MAINT", "COST_DRIVER", "COST_OTHER", "COST_TOTAL"]:
-                cleaned = master_df[col].astype(str).str.replace(r'[$,\s]', '', regex=True)
+            if col in target_cols:
+                series_val = master_df[col]
+                if isinstance(series_val, pd.DataFrame):
+                    series_val = series_val.iloc[:, 0]
+                cleaned = series_val.astype(str).str.replace(r'[$,\s]', '', regex=True)
                 master_df[col] = pd.to_numeric(cleaned, errors='coerce')
                 
+        has_rev = "REVENUE" in master_df.columns
         tot_rev = float(master_df["REVENUE"].sum()) if has_rev else 0.0
         cost_cols = [c for c in master_df.columns if c.startswith("COST_")]
         tot_cost = float(master_df[cost_cols].sum().sum()) if cost_cols else 0.0
@@ -240,7 +248,7 @@ def _read_workbook_bytes(filename: str, file_bytes: bytes) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "version": "1.0.0-Standalone", "timestamp": datetime.datetime.utcnow().isoformat()}
+    return {"status": "healthy", "version": "1.0.1-FixDuplicatedCols", "timestamp": datetime.datetime.utcnow().isoformat()}
 
 @app.post("/api/v1/data-understanding")
 async def data_understanding(file: UploadFile = File(...)):
