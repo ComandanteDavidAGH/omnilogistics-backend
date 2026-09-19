@@ -394,3 +394,23 @@ async def clear_all_action_tasks(
         return {"status": "success", "message": "Todas las tareas han sido purgadas."}
     finally:
         db.close()
+# ENDPOINT PARA CONSULTAR HISTORIAL DE AUDITORÍAS
+@app.get("/api/v1/audit-records")
+async def get_audit_records(x_tenant_id: str = Header(default="DEFAULT_TENANT")):
+    db = SessionLocal()
+    try:
+        records = db.query(AuditRecord).filter(AuditRecord.tenant_id == x_tenant_id).order_by(AuditRecord.timestamp.desc()).all()
+        return clean_value([
+            {
+                "id": r.id,
+                "filename": r.filename,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "quality_score": r.quality_score,
+                "analytical_confidence": r.analytical_confidence,
+                "financial_results": r.financial_results,
+                "anomalies_count": len(r.anomalies) if r.anomalies else 0
+            }
+            for r in records
+        ])
+    finally:
+        db.close()
