@@ -150,6 +150,88 @@ async def _unhandled(request: Request, exc: Exception):
 # ---------------------------------------------------------------------------
 # Utilidades
 # ---------------------------------------------------------------------------
+def evaluar_cobertura_y_confianza(hojas_procesadas: list) -> dict:
+    """Ajuste Plan v1.1: Calcula la cobertura analítica real y topa
+
+    la confianza analítica a 'MEDIA' si existen hojas sin incorporar.
+    """
+    total_hojas = len(hojas_procesadas)
+    if total_hojas == 0:
+        return {
+            "cobertura_pct": 0,
+            "confianza_nivel": "BAJA",
+            "confianza_score": 0,
+            "observaciones": [],
+        }
+
+    incorporadas = 0
+    auxiliares = 0
+    sin_incorporar = 0
+    observaciones = []
+    combinacion = []
+
+    keywords_aux = [
+        "control",
+        "instrucciones",
+        "notas",
+        "parametros",
+        "prueba",
+    ]
+
+    for h in hojas_procesadas:
+        nombre = h.get("name") or h.get("sheet") or ""
+        rol = h.get("role") or h.get("estado") or "DESCONOCIDO"
+
+        if "AUXILIAR" in str(rol).upper() or any(
+            k in nombre.lower() for k in keywords_aux
+        ):
+            auxiliares += 1
+            observaciones.append(
+                f"La hoja '{nombre}' es auxiliar/informativa: no participa en el modelo económico."
+            )
+            combinacion.append(
+                {"hoja": nombre, "estado": "Auxiliar (Informativa)"}
+            )
+        elif any(
+            k in str(rol).upper()
+            for k in ["BASE", "CRUZADA", "APILADA", "INCORPORADA"]
+        ):
+            incorporadas += 1
+            combinacion.append(
+                {"hoja": nombre, "estado": "Incorporada en el análisis"}
+            )
+        else:
+            sin_incorporar += 1
+            motivo = h.get("reason", "no comparte llave utilizable de relación")
+            observaciones.append(
+                f"La hoja '{nombre}' no fue incorporada: {motivo}."
+            )
+            combinacion.append(
+                {"hoja": nombre, "estado": "No se pudo incorporar"}
+            )
+
+    cobertura_pct = round(((incorporadas + auxiliares) / total_hojas) * 100, 1)
+
+    # Regla de Honestidad v1.1: Si quedan hojas sin incorporar, la confianza NUNCA pasa de MEDIA (max 60%)
+    if sin_incorporar > 0 or cobertura_pct < 80.0:
+        nivel_confianza = "MEDIA"
+        score_confianza = 60.0
+    else:
+        nivel_confianza = "ALTA"
+        score_confianza = 100.0
+
+    return {
+        "cobertura_analitica_pct": cobertura_pct,
+        "confianza_nivel": nivel_confianza,
+        "confianza_score": score_confianza,
+        "hojas_sin_incorporar": sin_incorporar,
+        "observaciones": observaciones,
+        "combinacion_hojas": combinacion,
+    }
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -452,6 +534,24 @@ def create_audit(
     outcome = clean(run_pipeline(dfs, mapping_dict, config))
 
     calidad = outcome["calidad"]
+
+    # --- INICIO AJUSTE PLAN v1.1 ---
+    # Extraer el reporte de hojas procesadas por el pipeline
+    merge_report = outcome.get("merge_report") or {}
+    hojas_analizadas = merge_report.get("sheets") or merge_report.get("hojas") or []
+
+    if hojas_analizadas:
+        dictamen = evaluar_cobertura_y_confianza(hojas_analizadas)
+        
+        # Sobrescribir indicadores inflados con métricas honestas
+        calidad["cobertura_analitica"] = dictamen["cobertura_analitica_pct"]
+        calidad["analytical_confidence"] = dictamen["confianza_score"]
+        calidad["nivelConfianza"] = dictamen["confianza_nivel"]
+        
+        # Añadir las observaciones de cobertura a las advertencias globales
+        if dictamen["observaciones"]:
+            outcome["advertencias"] = list(dictamen["observaciones"]) + list(outcome.get("advertencias", []))
+    # --- FIN AJUSTE PLAN v1.1 ---
     audit = AuditRecord(
         tenant_id=tenant_id,
         filename=name[:255],
