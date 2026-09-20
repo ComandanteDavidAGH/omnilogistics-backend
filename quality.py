@@ -138,9 +138,12 @@ class DataQualityGate:
             "scoreGlobal": round(quality, 1), "data_quality_score": round(quality, 1),
 
           # --- Regla de Cobertura Honesta (Plan v1.1) ---
-        total_tablas = len(merge_report.get("tablas", []))
-        total_joins = len(merge_report.get("joins", []))
-        if total_tablas > (total_joins + 1):
+        joins = merge_report.get("joins", [])
+        hojas_omitidas = any(j.get("modo") in ("sin_cruce", "aparte") for j in joins)
+        hojas_reporte = merge_report.get("hojas", [])
+        tiene_no_inc = any(h.get("estado") in ("NO_INCORPORADA", "AUXILIAR") for h in hojas_reporte)
+
+        if hojas_omitidas or tiene_no_inc:
             confidence = min(confidence, 60.0)
             add("COBERTURA_INCOMPLETA", "MEDIA", "Se detectaron hojas no integradas en el modelo. La confianza analítica se limita a 60%.")
 
