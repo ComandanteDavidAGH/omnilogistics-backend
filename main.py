@@ -63,10 +63,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="GENESIS CORE B2B", version=ENGINE_VERSION, lifespan=lifespan)
+
 app.add_middleware(
-    CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["X-API-Key", "X-Admin-Key", "Content-Type"],
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["Content-Disposition", "X-Request-ID"],
 )
 
