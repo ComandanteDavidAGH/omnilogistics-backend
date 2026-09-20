@@ -2,13 +2,13 @@
 
 Endpoints (todos requieren X-API-Key salvo /health, /ready y /admin, que usa X-Admin-Key):
   GET    /health, /ready
-  POST   /api/v1/admin/tenants                       crea un cliente y su primera clave
-  POST   /api/v1/admin/tenants/{id}/keys             emite otra clave (rotación)
+  POST   /api/v1/admin/tenants                        crea un cliente y su primera clave
+  POST   /api/v1/admin/tenants/{id}/keys              emite otra clave (rotación)
   POST   /api/v1/admin/keys/{key_id}/revoke          revoca una clave
-  GET    /api/v1/me                                  cliente actual y configuración
-  PUT    /api/v1/config                              umbrales del cliente (margen mínimo, IVA...)
+  GET    /api/v1/me                                   cliente actual y configuración
+  PUT    /api/v1/config                               umbrales del cliente (margen mínimo, IVA...)
   POST   /api/v1/data-understanding                  analiza un archivo y propone el mapeo
-  POST   /api/v1/audits                              ejecuta la auditoría económica
+  POST   /api/v1/audits                               ejecuta la auditoría económica
   GET    /api/v1/audits, /audits/{id}, /audits/{id}/export, DELETE /audits/{id}
   GET    /api/v1/tasks, PATCH /api/v1/tasks/{id}
 """
@@ -38,17 +38,34 @@ from .core.model import CANONICAL_IDS
 from .core.pipeline import run_pipeline
 from .core.semantic import GenesisDataUnderstanding, sheet_signature
 from .core.serialize import clean
-from .db import (ActionTask, ApiKey, AuditRecord, Finding, MappingMemory, Tenant, TenantConfig, get_db, init_db,
-                 utcnow)
+from .db import (
+    ActionTask,
+    ApiKey,
+    AuditRecord,
+    Finding,
+    MappingMemory,
+    Tenant,
+    TenantConfig,
+    get_db,
+    init_db,
+    utcnow,
+)
 from .errors import ApiError
 from .export import build_audit_workbook
-from .security import generate_api_key, hash_key, heavy_tenant, get_tenant_id, require_admin
+from .security import generate_api_key, get_tenant_id, hash_key, heavy_tenant, require_admin
 
 settings = get_settings()
 log = logging.getLogger("genesis")
 
-CONFIG_FIELDS = ["min_margin_percent", "z_score_threshold", "allow_negative_margin", "revenue_includes_vat",
-                 "vat_rate", "outlier_min_group", "reconciliation_tolerance_pct"]
+CONFIG_FIELDS = [
+    "min_margin_percent",
+    "z_score_threshold",
+    "allow_negative_margin",
+    "revenue_includes_vat",
+    "vat_rate",
+    "outlier_min_group",
+    "reconciliation_tolerance_pct",
+]
 TASK_STATUSES = ("PENDIENTE", "EN_PROCESO", "RESUELTA", "DESCARTADA")
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -64,6 +81,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="GENESIS CORE B2B", version=ENGINE_VERSION, lifespan=lifespan)
 
+# Configuración universal de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -85,8 +103,14 @@ async def request_context(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = rid
     response.headers["X-Content-Type-Options"] = "nosniff"
-    log.info("%s %s -> %s (%.0f ms) rid=%s", request.method, request.url.path, response.status_code,
-             (time.perf_counter() - start) * 1000, rid)
+    log.info(
+        "%s %s -> %s (%.0f ms) rid=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        (time.perf_counter() - start) * 1000,
+        rid,
+    )
     return response
 
 
@@ -115,8 +139,12 @@ async def _validation_error(request: Request, exc: RequestValidationError):
 async def _unhandled(request: Request, exc: Exception):
     error_id = uuid.uuid4().hex[:10]
     log.exception("Error no controlado error_id=%s path=%s", error_id, request.url.path)
-    return _error(request, 500, "ERROR_INTERNO",
-                  f"Ocurrió un error inesperado. Si persiste, comparte este código con soporte: {error_id}.")
+    return _error(
+        request,
+        500,
+        "ERROR_INTERNO",
+        f"Ocurrió un error inesperado. Si persiste, comparte este código con soporte: {error_id}.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,31 +210,67 @@ def finding_dict(f: Finding, cases_limit: Optional[int]) -> dict:
     casos = f.casos or []
     shown = casos if cases_limit is None else casos[:cases_limit]
     return {
-        "id": f.id, "tipo": f.tipo, "prioridad": f.prioridad, "severidad": f.severidad, "titulo": f.titulo,
-        "causa": f.causa, "impacto": f.impacto, "evidencia": f.evidencia, "accion": f.accion,
-        "vehiculos_afectados": f.vehiculos or [], "casos": shown, "casos_total": f.casos_total or 0,
+        "id": f.id,
+        "tipo": f.tipo,
+        "prioridad": f.prioridad,
+        "severidad": f.severidad,
+        "titulo": f.titulo,
+        "causa": f.causa,
+        "impacto": f.impacto,
+        "evidencia": f.evidencia,
+        "accion": f.accion,
+        "vehiculos_afectados": f.vehiculos or [],
+        "casos": shown,
+        "casos_total": f.casos_total or 0,
         "casos_guardados": len(casos),
     }
 
 
 def task_dict(t: ActionTask) -> dict:
-    return {"id": t.id, "audit_id": t.audit_id, "finding_id": t.finding_id, "department": t.department,
-            "title": t.title, "description": t.description, "financial_impact": t.financial_impact,
-            "urgency": t.urgency, "status": t.status, "comment": t.comment,
-            "created_at": _iso(t.created_at), "updated_at": _iso(t.updated_at)}
+    return {
+        "id": t.id,
+        "audit_id": t.audit_id,
+        "finding_id": t.finding_id,
+        "department": t.department,
+        "title": t.title,
+        "description": t.description,
+        "financial_impact": t.financial_impact,
+        "urgency": t.urgency,
+        "status": t.status,
+        "comment": t.comment,
+        "created_at": _iso(t.created_at),
+        "updated_at": _iso(t.updated_at),
+    }
 
 
 def audit_payload(db: Session, audit: AuditRecord, cases_limit: Optional[int] = 20) -> dict:
-    findings = (db.query(Finding).filter(Finding.audit_id == audit.id, Finding.tenant_id == audit.tenant_id)
-                .order_by(Finding.prioridad).all())
-    tasks = (db.query(ActionTask).filter(ActionTask.audit_id == audit.id, ActionTask.tenant_id == audit.tenant_id)
-             .order_by(ActionTask.id).all())
+    findings = (
+        db.query(Finding)
+        .filter(Finding.audit_id == audit.id, Finding.tenant_id == audit.tenant_id)
+        .order_by(Finding.prioridad)
+        .all()
+    )
+    tasks = (
+        db.query(ActionTask)
+        .filter(ActionTask.audit_id == audit.id, ActionTask.tenant_id == audit.tenant_id)
+        .order_by(ActionTask.id)
+        .all()
+    )
     return {
-        "id": audit.id, "filename": audit.filename, "timestamp": _iso(audit.timestamp), "estado": audit.estado,
-        "engine_version": audit.engine_version, "file_sha256": audit.file_sha256, "calidad": audit.quality_report,
-        "financials": audit.financial_results, "advertencias": audit.warnings or [], "monthly": audit.monthly or [],
-        "merge_report": audit.merge_report, "config": audit.config_snapshot,
-        "findings": [finding_dict(f, cases_limit) for f in findings], "tasks": [task_dict(t) for t in tasks],
+        "id": audit.id,
+        "filename": audit.filename,
+        "timestamp": _iso(audit.timestamp),
+        "estado": audit.estado,
+        "engine_version": audit.engine_version,
+        "file_sha256": audit.file_sha256,
+        "calidad": audit.quality_report,
+        "financials": audit.financial_results,
+        "advertencias": audit.warnings or [],
+        "monthly": audit.monthly or [],
+        "merge_report": audit.merge_report,
+        "config": audit.config_snapshot,
+        "findings": [finding_dict(f, cases_limit) for f in findings],
+        "tasks": [task_dict(t) for t in tasks],
     }
 
 
@@ -219,8 +283,11 @@ def remember_mapping(db: Session, tenant_id: str, mapping: dict, dfs: dict) -> N
         cols = [c for c in df.columns if not str(c).startswith("_src_")]
         signature = sheet_signature(cols)
         full = {c: scoped.get(c, "UNKNOWN") for c in cols}
-        row = (db.query(MappingMemory).filter(MappingMemory.tenant_id == tenant_id,
-                                              MappingMemory.signature == signature).first())
+        row = (
+            db.query(MappingMemory)
+            .filter(MappingMemory.tenant_id == tenant_id, MappingMemory.signature == signature)
+            .first()
+        )
         if row is None:
             db.add(MappingMemory(tenant_id=tenant_id, signature=signature, sheet_name=sheet, mapping=full))
         else:
@@ -277,8 +344,17 @@ def issue_key(tenant_id: str, label: str = Query("rotacion", max_length=100), db
 @app.get("/api/v1/admin/tenants/{tenant_id}/keys", dependencies=[Depends(require_admin)])
 def list_keys(tenant_id: str, db: Session = Depends(get_db)):
     rows = db.query(ApiKey).filter(ApiKey.tenant_id == tenant_id).order_by(ApiKey.id).all()
-    return [{"id": k.id, "prefix": k.prefix, "label": k.label, "revoked": k.revoked,
-             "created_at": _iso(k.created_at), "last_used_at": _iso(k.last_used_at)} for k in rows]
+    return [
+        {
+            "id": k.id,
+            "prefix": k.prefix,
+            "label": k.label,
+            "revoked": k.revoked,
+            "created_at": _iso(k.created_at),
+            "last_used_at": _iso(k.last_used_at),
+        }
+        for k in rows
+    ]
 
 
 @app.post("/api/v1/admin/keys/{key_id}/revoke", dependencies=[Depends(require_admin)])
@@ -297,8 +373,13 @@ def revoke_key(key_id: int, db: Session = Depends(get_db)):
 @app.get("/api/v1/me")
 def me(tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
     tenant = db.get(Tenant, tenant_id)
-    return {"tenant_id": tenant_id, "name": tenant.name, "config": config_to_dict(get_or_create_config(db, tenant_id)),
-            "engine_version": ENGINE_VERSION, "limits": {"max_upload_mb": settings.max_upload_mb}}
+    return {
+        "tenant_id": tenant_id,
+        "name": tenant.name,
+        "config": config_to_dict(get_or_create_config(db, tenant_id)),
+        "engine_version": ENGINE_VERSION,
+        "limits": {"max_upload_mb": settings.max_upload_mb},
+    }
 
 
 class ConfigUpdate(BaseModel):
@@ -327,8 +408,9 @@ def update_config(body: ConfigUpdate, tenant_id: str = Depends(get_tenant_id), d
 # Entendimiento de datos y auditoría
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/data-understanding")
-def data_understanding(file: UploadFile = File(...), tenant_id: str = Depends(heavy_tenant),
-                       db: Session = Depends(get_db)):
+def data_understanding(
+    file: UploadFile = File(...), tenant_id: str = Depends(heavy_tenant), db: Session = Depends(get_db)
+):
     name, data = read_upload(file)
     dfs = read_workbook(name, data, settings)
     memory = {m.signature: m.mapping for m in db.query(MappingMemory).filter(MappingMemory.tenant_id == tenant_id).all()}
@@ -338,17 +420,29 @@ def data_understanding(file: UploadFile = File(...), tenant_id: str = Depends(he
 
 
 @app.post("/api/v1/audits")
-def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_id: str = Depends(heavy_tenant),
-                 db: Session = Depends(get_db)):
+def create_audit(
+    file: UploadFile = File(...),
+    mapping: str = Form(...),
+    tenant_id: str = Depends(heavy_tenant),
+    db: Session = Depends(get_db),
+):
     name, data = read_upload(file)
     mapping_dict = parse_mapping(mapping)
     config = config_to_dict(get_or_create_config(db, tenant_id))
     file_hash, mapping_hash, config_hash = _sha(data), _json_sha(mapping_dict), _json_sha(config)
 
-    existing = (db.query(AuditRecord).filter(
-        AuditRecord.tenant_id == tenant_id, AuditRecord.file_sha256 == file_hash,
-        AuditRecord.mapping_sha256 == mapping_hash, AuditRecord.config_sha256 == config_hash,
-        AuditRecord.engine_version == ENGINE_VERSION).order_by(AuditRecord.id.desc()).first())
+    existing = (
+        db.query(AuditRecord)
+        .filter(
+            AuditRecord.tenant_id == tenant_id,
+            AuditRecord.file_sha256 == file_hash,
+            AuditRecord.mapping_sha256 == mapping_hash,
+            AuditRecord.config_sha256 == config_hash,
+            AuditRecord.engine_version == ENGINE_VERSION,
+        )
+        .order_by(AuditRecord.id.desc())
+        .first()
+    )
     if existing:
         payload = audit_payload(db, existing)
         payload["reutilizado"] = True
@@ -359,26 +453,57 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_
 
     calidad = outcome["calidad"]
     audit = AuditRecord(
-        tenant_id=tenant_id, filename=name[:255], file_sha256=file_hash, mapping_sha256=mapping_hash,
-        config_sha256=config_hash, engine_version=ENGINE_VERSION, estado=outcome["estado"],
-        gate_level=calidad["nivelConfianza"], quality_score=calidad["data_quality_score"],
-        analytical_confidence=calidad["analytical_confidence"], mapping=mapping_dict, config_snapshot=config,
-        quality_report=calidad, financial_results=outcome["financials"], warnings=outcome["advertencias"],
-        monthly=outcome["monthly"], merge_report=outcome["merge_report"])
+        tenant_id=tenant_id,
+        filename=name[:255],
+        file_sha256=file_hash,
+        mapping_sha256=mapping_hash,
+        config_sha256=config_hash,
+        engine_version=ENGINE_VERSION,
+        estado=outcome["estado"],
+        gate_level=calidad["nivelConfianza"],
+        quality_score=calidad["data_quality_score"],
+        analytical_confidence=calidad["analytical_confidence"],
+        mapping=mapping_dict,
+        config_snapshot=config,
+        quality_report=calidad,
+        financial_results=outcome["financials"],
+        warnings=outcome["advertencias"],
+        monthly=outcome["monthly"],
+        merge_report=outcome["merge_report"],
+    )
     db.add(audit)
     db.flush()
 
     for f in outcome["findings"]:
         row = Finding(
-            audit_id=audit.id, tenant_id=tenant_id, tipo=f["tipo"], prioridad=f["prioridad"], severidad=f["severidad"],
-            titulo=f["titulo"], causa=f["causa"], impacto=f["impacto"], evidencia=f["evidencia"], accion=f["accion"],
-            vehiculos=f["vehiculos_afectados"], casos=f["casos"], casos_total=f["casos_total"])
+            audit_id=audit.id,
+            tenant_id=tenant_id,
+            tipo=f["tipo"],
+            prioridad=f["prioridad"],
+            severidad=f["severidad"],
+            titulo=f["titulo"],
+            causa=f["causa"],
+            impacto=f["impacto"],
+            evidencia=f["evidencia"],
+            accion=f["accion"],
+            vehiculos=f["vehiculos_afectados"],
+            casos=f["casos"],
+            casos_total=f["casos_total"],
+        )
         db.add(row)
         db.flush()
-        db.add(ActionTask(
-            tenant_id=tenant_id, audit_id=audit.id, finding_id=row.id, department=f["accion"]["departamento"],
-            title=f["titulo"], description=f["accion"]["accion"], financial_impact=f["impacto"]["impacto_directo"],
-            urgency=f["accion"]["urgencia"]))
+        db.add(
+            ActionTask(
+                tenant_id=tenant_id,
+                audit_id=audit.id,
+                finding_id=row.id,
+                department=f["accion"]["departamento"],
+                title=f["titulo"],
+                description=f["accion"]["accion"],
+                financial_impact=f["impacto"]["impacto_directo"],
+                urgency=f["accion"]["urgencia"],
+            )
+        )
 
     if outcome["estado"] != "BLOQUEADA":
         remember_mapping(db, tenant_id, mapping_dict, dfs)
@@ -396,18 +521,31 @@ def _get_audit(db: Session, tenant_id: str, audit_id: int) -> AuditRecord:
 
 
 @app.get("/api/v1/audits")
-def list_audits(limit: int = Query(30, ge=1, le=100), offset: int = Query(0, ge=0),
-                tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
+def list_audits(
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
     q = db.query(AuditRecord).filter(AuditRecord.tenant_id == tenant_id)
     total = q.count()
     rows = q.order_by(AuditRecord.id.desc()).limit(limit).offset(offset).all()
     items = []
     for a in rows:
         fin = a.financial_results or {}
-        items.append({"id": a.id, "filename": a.filename, "timestamp": _iso(a.timestamp), "estado": a.estado,
-                      "nivel": a.gate_level, "totalIngresos": fin.get("totalIngresos"),
-                      "margenGlobal": fin.get("margenGlobal"), "dineroEnRiesgo": fin.get("dineroEnRiesgo"),
-                      "totalHallazgos": fin.get("totalHallazgos", 0)})
+        items.append(
+            {
+                "id": a.id,
+                "filename": a.filename,
+                "timestamp": _iso(a.timestamp),
+                "estado": a.estado,
+                "nivel": a.gate_level,
+                "totalIngresos": fin.get("totalIngresos"),
+                "margenGlobal": fin.get("margenGlobal"),
+                "dineroEnRiesgo": fin.get("dineroEnRiesgo"),
+                "totalHallazgos": fin.get("totalHallazgos", 0),
+            }
+        )
     return {"items": items, "total": total}
 
 
@@ -420,8 +558,11 @@ def get_audit(audit_id: int, tenant_id: str = Depends(get_tenant_id), db: Sessio
 def export_audit(audit_id: int, tenant_id: str = Depends(heavy_tenant), db: Session = Depends(get_db)):
     payload = audit_payload(db, _get_audit(db, tenant_id, audit_id), cases_limit=None)
     content = build_audit_workbook(payload, payload["findings"], payload["tasks"])
-    return Response(content=content, media_type=XLSX_MIME,
-                    headers={"Content-Disposition": f'attachment; filename="genesis_auditoria_{audit_id}.xlsx"'})
+    return Response(
+        content=content,
+        media_type=XLSX_MIME,
+        headers={"Content-Disposition": f'attachment; filename="genesis_auditoria_{audit_id}.xlsx"'},
+    )
 
 
 @app.delete("/api/v1/audits/{audit_id}")
@@ -439,9 +580,14 @@ def delete_audit(audit_id: int, tenant_id: str = Depends(get_tenant_id), db: Ses
 # Tareas
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/tasks")
-def list_tasks(status: Optional[str] = Query(None), audit_id: Optional[int] = Query(None),
-               limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0),
-               tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
+def list_tasks(
+    status: Optional[str] = Query(None),
+    audit_id: Optional[int] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    tenant_id: str = Depends(get_tenant_id),
+    db: Session = Depends(get_db),
+):
     q = db.query(ActionTask).filter(ActionTask.tenant_id == tenant_id)
     if status:
         if status not in TASK_STATUSES:
