@@ -1,14 +1,15 @@
-"""Consolidación segura de hojas.
+"""Consolidación segura de hojas (v1.1: con registro del rol de CADA hoja para medir cobertura).
 
 Reglas que evitan los errores silenciosos más comunes:
   1. Hojas con la misma estructura (p. ej. una por mes) se APILAN, no se cruzan.
   2. Un cruce por viaje agrega primero el lado "muchos" (varias cargas de combustible por viaje se
      suman) y valida la cardinalidad muchos-a-uno: el cruce jamás multiplica filas.
-  3. Una hoja con medidas y sin TRIP_ID NO se cruza por vehículo fila a fila (inflaría los totales);
-     se conserva aparte para el análisis por vehículo.
+  3. Una hoja con medidas y sin TRIP_ID NO se cruza por vehículo fila a fila (inflaría los totales).
   4. Todo cruce reporta su cobertura (qué porcentaje de llaves coincidió) y los registros huérfanos.
-  5. Si dos hojas aportan la misma medida (p. ej. ingreso en operación y en facturación), la segunda se
-     guarda como `<CAMPO>__alt` para conciliar en lugar de descartarse.
+  5. Si dos hojas aportan la misma medida, la segunda se guarda como `<CAMPO>__alt` para conciliar.
+  6. NUEVO: cada hoja recibida queda registrada en report["hojas"] con su estado
+     (INCORPORADA / NO_INCORPORADA / AUXILIAR) y el motivo. La compuerta de calidad usa esto
+     para que la confianza nunca sea 100 % si quedaron datos económicos sin usar.
 """
 from __future__ import annotations
 
@@ -16,8 +17,12 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from .model import KEYS, MEASURES
-from .parsing import normalize_key, parse_dates, parse_numeric
+try:  # estructura de paquete (app/core/...)
+    from .model import KEYS, MEASURES
+    from .parsing import normalize_key, parse_dates, parse_numeric
+except ImportError:  # estructura plana (archivos sueltos en una carpeta)
+    from model import KEYS, MEASURES
+    from parsing import normalize_key, parse_dates, parse_numeric
 
 
 @dataclass
@@ -75,6 +80,10 @@ def _canon_cols(df: pd.DataFrame) -> set:
     return {c for c in df.columns if not c.startswith("_src_") and not c.endswith("__alt")}
 
 
+def _measures_in(df: pd.DataFrame) -> list:
+    return [c for c in MEASURES if c in df.columns]
+
+
 def _parallel_sources(existing: list, other: pd.DataFrame) -> bool:
     """Dos hojas con los mismos viajes son fuentes paralelas (operación vs. facturación), no periodos."""
     if "TRIP_ID" not in other.columns or not any("TRIP_ID" in d.columns for d in existing):
@@ -95,10 +104,11 @@ def _stack_compatible(tables: list, warnings: list) -> list:
             if union and len(cols & g["cols"]) / len(union) >= 0.8 and not _parallel_sources(g["dfs"], t["df"]):
                 g["names"].append(t["name"])
                 g["dfs"].append(t["df"])
+                g["rows"].update(t["rows"])
                 g["cols"] |= cols
                 break
         else:
-            groups.append({"names": [t["name"]], "dfs": [t["df"]], "cols": set(cols)})
+            groups.append({"names": [t["name"]], "dfs": [t["df"]], "rows": dict(t["rows"]), "cols": set(cols)})
 
     result = []
     for g in groups:
@@ -108,7 +118,7 @@ def _stack_compatible(tables: list, warnings: list) -> list:
                             f"apilaron como un solo periodo continuo ({len(stacked):,} filas).")
         else:
             stacked = g["dfs"][0].reset_index(drop=True)
-        result.append({"name": " + ".join(g["names"]), "df": stacked})
+        result.append({"name": " + ".join(g["names"]), "df": stacked, "sheets": list(g["names"]), "rows": g["rows"]})
     return result
 
 
@@ -134,36 +144,56 @@ def _score_table(df: pd.DataFrame) -> tuple:
     )
 
 
+def _mark(hojas: list, table: dict, estado: str, rol: str, motivo: str, measures: list, secundaria: bool = False) -> None:
+    """Registra el estado de cada hoja de origen que compone esta tabla."""
+    for sheet in table["sheets"]:
+        hojas.append({
+            "nombre": sheet, "filas": int(table["rows"].get(sheet, 0)), "tabla": table["name"],
+            "estado": estado, "rol": rol, "motivo": motivo, "medidas": list(measures),
+            "aporta_medidas": bool(measures), "secundaria": secundaria,
+        })
+
+
 def build_master(dfs: dict, mapping: dict) -> MergeResult:
     warnings: list = []
     stats: dict = {}
+    hojas: list = []
     tables = []
     for sheet, df in dfs.items():
         if df.empty:
             continue
         table = _canonical_table(sheet, df, mapping.get(sheet, {}) or {}, warnings, stats)
         if table is None:
-            warnings.append(f"La hoja '{sheet}' se omitió: ninguna de sus columnas quedó asignada a un campo.")
+            hojas.append({"nombre": sheet, "filas": int(len(df)), "tabla": sheet, "estado": "AUXILIAR", "rol": "AUXILIAR",
+                          "motivo": "No participa en el modelo: ninguna de sus columnas quedó asignada a un campo "
+                                    "(hoja de control, notas o parámetros).",
+                          "medidas": [], "aporta_medidas": False, "secundaria": False})
+            warnings.append(f"La hoja '{sheet}' se trató como auxiliar: no participa en el modelo económico.")
             continue
-        tables.append({"name": sheet, "df": table})
+        tables.append({"name": sheet, "df": table, "sheets": [sheet], "rows": {sheet: len(df)}})
 
     if not tables:
         return MergeResult(master=pd.DataFrame(), warnings=warnings, parse_stats=stats,
-                           report={"tablas": [], "joins": [], "base": None})
+                           report={"tablas": [], "joins": [], "base": None, "hojas": hojas})
 
     tables = _stack_compatible(tables, warnings)
     base_idx = max(range(len(tables)), key=lambda i: _score_table(tables[i]["df"]))
-    base_name, base = tables[base_idx]["name"], tables[base_idx]["df"]
+    base_t = tables[base_idx]
+    base_name, base = base_t["name"], base_t["df"]
     others = [t for i, t in enumerate(tables) if i != base_idx]
+
+    _mark(hojas, base_t, "INCORPORADA", "BASE" if len(base_t["sheets"]) == 1 else "BASE_APILADA",
+          "Hoja principal del análisis." if len(base_t["sheets"]) == 1
+          else "Hojas con la misma estructura apiladas como hoja principal.", _measures_in(base))
 
     result = MergeResult(master=base, warnings=warnings, parse_stats=stats,
                          report={"base": base_name, "tablas": [{"nombre": t["name"], "filas": len(t["df"])} for t in tables],
-                                 "joins": [], "alternativas": {}})
+                                 "joins": [], "alternativas": {}, "hojas": hojas})
 
     for t in others:
         name, right = t["name"], t["df"]
         shared = [k for k in KEYS if k in base.columns and k in right.columns]
-        right_measures = [c for c in MEASURES if c in right.columns]
+        right_measures = _measures_in(right)
 
         if "TRIP_ID" in shared:
             mode, key = "por_viaje", "TRIP_ID"
@@ -173,11 +203,17 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
             result.secondary.append({"name": name, "df": right})
             result.report["joins"].append({"tabla": name, "modo": "aparte", "llave": "VEHICLE_ID",
                                            "filas_origen": len(right)})
-            warnings.append(f"La hoja '{name}' aporta {', '.join(right_measures)} pero no tiene TRIP_ID: no se "
-                            "cruzó fila a fila (multiplicaría los valores). Se usa para el análisis por vehículo.")
+            _mark(hojas, t, "NO_INCORPORADA", "SIN_ID_DE_VIAJE",
+                  f"Aporta {', '.join(right_measures)} pero no tiene ID de viaje: no se puede cruzar fila a fila "
+                  "sin multiplicar los valores.", right_measures, secundaria=True)
+            warnings.append(f"La hoja '{name}' aporta {', '.join(right_measures)} pero no tiene TRIP_ID: no se cruzó "
+                            "fila a fila (multiplicaría los valores).")
             continue
         else:
             result.report["joins"].append({"tabla": name, "modo": "sin_cruce", "llave": None, "filas_origen": len(right)})
+            _mark(hojas, t, "NO_INCORPORADA", "SIN_CRUCE",
+                  "No comparte ID de viaje ni placa con la hoja base. Asigna una de esas columnas para poder cruzarla.",
+                  right_measures)
             warnings.append(f"La hoja '{name}' no comparte una llave utilizable (TRIP_ID o placa) con '{base_name}'; "
                             "sus datos NO se incluyeron en el análisis.")
             continue
@@ -222,12 +258,20 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
             "columnas_aportadas": contributed,
         })
         if mode == "por_viaje":
+            _mark(hojas, t, "INCORPORADA", "CRUZADA_POR_VIAJE",
+                  f"Cruzada por ID de viaje: el {pct_trips}% de los viajes tiene registro aquí.", right_measures)
             if len(orphan):
                 result.unmatched[name] = orphan.reset_index(drop=True)
                 warnings.append(f"{len(orphan):,} de {len(agg_keys):,} llaves de '{name}' ({pct_orphan}%) no existen en "
                                 f"'{base_name}'.")
             if pct_trips < 100:
                 warnings.append(f"Solo el {pct_trips}% de los viajes de '{base_name}' tiene registro en '{name}'.")
+        else:
+            if contributed:
+                _mark(hojas, t, "INCORPORADA", "ATRIBUTOS", f"Enlazada por {key} para agregar atributos.", right_measures)
+            else:
+                _mark(hojas, t, "NO_INCORPORADA", "SIN_CAMPOS_NUEVOS",
+                      "Sus campos ya existían en la hoja base: no cambia el cálculo.", right_measures)
 
     result.master = base.reset_index(drop=True)
     return result
