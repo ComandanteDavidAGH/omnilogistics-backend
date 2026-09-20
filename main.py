@@ -232,8 +232,6 @@ def evaluar_cobertura_y_confianza(hojas_procesadas: list) -> dict:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-def _sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _json_sha(obj) -> str:
