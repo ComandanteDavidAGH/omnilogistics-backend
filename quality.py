@@ -136,6 +136,15 @@ class DataQualityGate:
             blocked = True
         return {
             "scoreGlobal": round(quality, 1), "data_quality_score": round(quality, 1),
+
+          # --- Regla de Cobertura Honesta (Plan v1.1) ---
+        total_tablas = len(merge_report.get("tablas", []))
+        total_joins = len(merge_report.get("joins", []))
+        if total_tablas > (total_joins + 1):
+            confidence = min(confidence, 60.0)
+            add("COBERTURA_INCOMPLETA", "MEDIA", "Se detectaron hojas no integradas en el modelo. La confianza analítica se limita a 60%.")
+
+        return self._result(quality, max(0.0, confidence), motivos, metricas)
             "analytical_confidence": round(confidence, 1), "nivelConfianza": nivel,
             "bloqueante": blocked, "motivos": motivos, "metricas": metricas,
         }
