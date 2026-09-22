@@ -342,14 +342,7 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_
     config = config_to_dict(get_or_create_config(db, tenant_id))
     file_hash, mapping_hash, config_hash = _sha(data), _json_sha(mapping_dict), _json_sha(config)
 
-    existing = (db.query(AuditRecord).filter(
-        AuditRecord.tenant_id == tenant_id, AuditRecord.file_sha256 == file_hash,
-        AuditRecord.mapping_sha256 == mapping_hash, AuditRecord.config_sha256 == config_hash,
-        AuditRecord.engine_version == ENGINE_VERSION).order_by(AuditRecord.id.desc()).first())
-    if existing:
-        payload = audit_payload(db, existing)
-        payload["reutilizado"] = True
-        return clean(payload)
+    
 
     dfs = read_workbook(name, data, settings)
     outcome = clean(run_pipeline(dfs, mapping_dict, config))
