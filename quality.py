@@ -173,6 +173,12 @@ class DataQualityGate:
         add("SIN_COBERTURA", "ALTA", "El pipeline no reportó cobertura; la confianza puede estar sobreestimada.")
     else:
         pend = coverage.get("hojas_con_medidas_no_incorporadas", [])
+        
+        # --- ¡EL GOLPE DE GRACIA! ---
+        if not pend and coverage.get("hojas_no_incorporadas"):
+            pend = coverage.get("hojas_no_incorporadas")
+        # ----------------------------
+
         if pend:
             cap = min(cap, CAP_MEDIDAS_SIN_USAR)
             medidas = ", ".join(LABELS.get(m, m) for m in coverage.get("medidas_no_incorporadas", []))
@@ -193,7 +199,7 @@ class DataQualityGate:
         metricas["cobertura_economica"] = econ
 
     confidence = min(confidence, cap)
-        return self._result(quality, max(0.0, confidence), motivos, metricas, coverage)
+    return self._result(quality, max(0.0, confidence), motivos, metricas, coverage)
 
     @staticmethod
     def _result(quality: float, confidence: float, motivos: list, metricas: dict, coverage=None) -> dict:
