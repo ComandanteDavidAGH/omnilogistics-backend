@@ -84,6 +84,24 @@ def _measures_in(df: pd.DataFrame) -> list:
     return [c for c in MEASURES if c in df.columns]
 
 
+def _medidas_sospechosas(df_original: pd.DataFrame, mapeadas: set) -> list:
+    """Detecta columnas con pinta de medida económica que NO llegaron al modelo canónico."""
+    patrones = ("litro", "galon", "galón", "fuel", "combustible", "gasolina", "diesel",
+                "costo", "coste", "valor", "precio", "importe", "peaje", "mantenimiento",
+                "kilometr", "distancia", "km", "ingreso", "venta", "factur", "total", "monto")
+    sospechosas = []
+    for col in df_original.columns:
+        if col in mapeadas or str(col).startswith("_src_"):
+            continue
+        nombre = str(col).lower()
+        if not any(p in nombre for p in patrones):
+            continue
+        serie = df_original[col]
+        # Si es numérica o se puede convertir a número
+        if pd.api.types.is_numeric_dtype(serie) or (serie.dropna().apply(lambda x: str(x).replace('.', '', 1).isdigit()).mean() >= 0.7):
+            sospechosas.append(str(col))
+    return sospechosas
+
 def _parallel_sources(existing: list, other: pd.DataFrame) -> bool:
     """Dos hojas con los mismos viajes son fuentes paralelas (operación vs. facturación), no periodos."""
     if "TRIP_ID" not in other.columns or not any("TRIP_ID" in d.columns for d in existing):
