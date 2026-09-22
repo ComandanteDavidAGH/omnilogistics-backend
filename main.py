@@ -342,7 +342,7 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_
     config = config_to_dict(get_or_create_config(db, tenant_id))
     file_hash, mapping_hash, config_hash = _sha(data), _json_sha(mapping_dict), _json_sha(config)
 
-    
+    # Despliegue definitivo sin cache
 
     dfs = read_workbook(name, data, settings)
     outcome = clean(run_pipeline(dfs, mapping_dict, config))
