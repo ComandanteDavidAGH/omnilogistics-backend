@@ -3,6 +3,7 @@
 Evalúa de forma independiente:
   1. Calidad de Datos (Cleanliness): Completitud, unicidad y tasa de lectura numérica.
   2. Integridad del Modelo (Model Integrity): Coincidencia de llaves, huérfanos y solidez de uniones.
+  3. Cobertura de Hojas: Cálculo de registros e incorporación.
 """
 from __future__ import annotations
 
@@ -14,6 +15,44 @@ from .model import COST_COLUMNS, LABELS
 
 def _ratio(num: float, den: float) -> float:
     return (num / den) if den else 0.0
+
+
+def _pct(num: float, den: float):
+    return round(100 * num / den, 1) if den else None
+
+
+def compute_coverage(hojas: list, secondary_used=None) -> dict:
+    """Cobertura analítica a partir del estado de cada hoja recibida."""
+    secondary_used = secondary_used or set()
+    items = []
+    for h in hojas:
+        h = dict(h)
+        if h.get("secundaria") and h.get("tabla") in secondary_used:
+            h["estado"], h["rol"] = "INCORPORADA", "POR_VEHICULO"
+            h["motivo"] = "Se usó para calcular costos y margen por vehículo."
+        items.append(h)
+
+    modelables = [h for h in items if h.get("estado") != "AUXILIAR"]
+    incorporadas = [h for h in modelables if h.get("estado") == "INCORPORADA"]
+    no_inc = [h for h in modelables if h.get("estado") != "INCORPORADA"]
+    econ = [h for h in modelables if h.get("aporta_medidas")]
+    econ_inc = [h for h in econ if h.get("estado") == "INCORPORADA"]
+    econ_no_inc = [h for h in econ if h.get("estado") != "INCORPORADA"]
+
+    return {
+        "hojas": items,
+        "hojas_recibidas": len(items),
+        "hojas_auxiliares": len(items) - len(modelables),
+        "hojas_modelables": len(modelables),
+        "hojas_incorporadas": len(incorporadas),
+        "hojas_no_incorporadas": [h["nombre"] for h in no_inc],
+        "hojas_con_medidas_no_incorporadas": [h["nombre"] for h in econ_no_inc],
+        "medidas_no_incorporadas": sorted({m for h in econ_no_inc for m in h.get("medidas", [])}),
+        "registros_recibidos": sum(h.get("filas", 0) for h in modelables),
+        "registros_incorporados": sum(h.get("filas", 0) for h in incorporadas),
+        "cobertura_hojas": _pct(len(incorporadas), len(modelables)),
+        "cobertura_economica": _pct(sum(h.get("filas", 0) for h in econ_inc), sum(h.get("filas", 0) for h in econ)),
+    }
 
 
 @dataclass
@@ -49,7 +88,7 @@ class QualityEngine:
         cost_cols = [c for c in COST_COLUMNS if c in cols]
         has_rev = "REVENUE" in cols
 
-        # --- 1. MÈTRICAS DE LIMPIEZA DE DATOS ---
+        # --- MÈTRICAS DE LIMPIEZA DE DATOS ---
         key_fields = [c for c in ["TRIP_ID", "REVENUE", "VEHICLE_ID", "TRIP_DATE"] + cost_cols if c in cols]
         completitud = 100 * sum(master[c].notna().mean() for c in key_fields) / len(key_fields) if key_fields else 0.0
         canon = [c for c in master.columns if not c.startswith("_src_") and not c.endswith("__alt")]
@@ -67,7 +106,6 @@ class QualityEngine:
 
         data_quality_score = round((completitud + unicidad + tasa_lectura) / 3, 1)
 
-        # Validación de reglas de bloqueo por datos ilegibles
         if not has_rev and not cost_cols:
             add("SIN_MEDIDAS", "BLOQUEANTE", "No hay columna de ingresos ni de costos asignada; no se puede calcular nada económico.")
 
@@ -76,7 +114,7 @@ class QualityEngine:
                 add("LECTURA_NUMERICA", "BLOQUEANTE",
                     f"El {rate:.0%} de los valores de '{LABELS.get(fld, fld)}' no se pudo leer como número.")
 
-        # --- 2. INTEGRIDAD DEL MODELO Y RELACIONES ---
+        # --- INTEGRIDAD DEL MODELO Y RELACIONES ---
         joins = [j for j in merge_report.get("joins", []) if j.get("modo") == "por_viaje"]
         cobertura_cruce = min((j["pct_base_con_match"] for j in joins), default=100.0)
         cobertura_id = 100 * master["TRIP_ID"].notna().mean() if "TRIP_ID" in cols else 0.0
