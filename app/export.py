@@ -1,75 +1,186 @@
-"""Exportación a Excel de una auditoría económica (v1.2 Enterprise).
+"""Exportador de Auditorías Económicas de Genesis Core v1.2.
 
-Genera un libro multi-pestaña con trazabilidad ejecutiva:
-  - Resumen: Indicadores financieros, desglose de confianza y calidad.
-  - Hallazgos: Tabla de hallazgos con Regla, Variable, Benchmark y Valor detectado.
-  - Casos: Evidencia detallada registro a registro.
-  - Serie mensual: Tendencia de ingresos, costos y margen.
-  - Tareas: Plan de acción priorizado por departamento.
-
-Protección contra inyección de fórmulas:
-Cualquier celda de texto que comience con =, +, -, @ se escapa con una comilla (').
+Genera libros de Excel con diseño ejecutivo gerencial:
+  - Paleta de color corporativa (Slate/Navy, gris neutro y acentos de severidad).
+  - Bloque de encabezado institucional y tarjetas KPI.
+  - Formato estricto de celdas (COP $, %, enteros).
+  - Ancho de columna dinámico y líneas de cuadrícula habilitadas.
+  - Protección contra inyección de fórmulas.
 """
 from __future__ import annotations
 
 import io
 import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# --- PALETA CORPORATIVA GENESIS ---
+COLOR_HEADER_BG = "0F172A"       # Azul Marino Oscuro / Navy
+COLOR_HEADER_TEXT = "FFFFFF"     # Blanco
+COLOR_ACCENT = "1E3A8A"          # Azul Corporativo
+COLOR_ZEBRA = "F8FAFC"           # Gris ultra claro para filas pares
+COLOR_BORDER = "CBD5E1"          # Gris bordes suaves
+COLOR_CARD_BG = "F1F5F9"         # Fondo para tarjetas KPI
+
+# Colores para badges de severidad / urgencia
+SEVERITY_STYLES = {
+    "ALTA": {"fill": "FEE2E2", "font": "991B1B"},      # Rojo suave
+    "MEDIA": {"fill": "FEF3C7", "font": "92400E"},     # Ámbar suave
+    "BAJA": {"fill": "DCFCE7", "font": "166534"},      # Verde suave
+    "PENDIENTE": {"fill": "E2E8F0", "font": "334155"}  # Gris neutral
+}
 
 _DANGEROUS = ("=", "+", "-", "@", "\t", "\r")
-_CASE_FIRST = ["hallazgo", "hoja", "fila", "trip_id", "vehiculo", "ruta", "cliente", "fecha", "ingreso", "costo"]
 
-
-def xl_safe(value):
+def _xl_safe(value):
     if isinstance(value, str) and value[:1] in _DANGEROUS:
         return "'" + value
     return value
 
+def _style_header_cell(cell, text):
+    cell.value = _xl_safe(text)
+    cell.font = Font(name="Calibri", size=11, bold=True, color=COLOR_HEADER_TEXT)
+    cell.fill = PatternFill(start_color=COLOR_HEADER_BG, end_color=COLOR_HEADER_BG, fill_type="solid")
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-def _safe_frame(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    out = df.copy()
-    for col in out.columns:
-        if out[col].dtype == object or str(out[col].dtype).startswith("str"):
-            out[col] = out[col].map(xl_safe)
-    out.columns = [xl_safe(str(c)) for c in out.columns]
-    return out
+def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None):
+    currency_cols = currency_cols or []
+    pct_cols = pct_cols or []
+    thin_border = Border(
+        left=Side(style="thin", color=COLOR_BORDER),
+        right=Side(style="thin", color=COLOR_BORDER),
+        top=Side(style="thin", color=COLOR_BORDER),
+        bottom=Side(style="thin", color=COLOR_BORDER)
+    )
 
+    # 1. Escribir Encabezados de Tabla
+    for col_idx, col_name in enumerate(df.columns, 1):
+        cell = ws.cell(row=start_row, column=col_idx)
+        _style_header_cell(cell, col_name)
+    ws.row_dimensions[start_row].height = 26
 
-def _autofit(ws) -> None:
-    for column in ws.columns:
-        width = max((len(str(c.value)) for c in column if c.value is not None), default=8)
-        ws.column_dimensions[column[0].column_letter].width = min(max(width + 2, 10), 60)
-    ws.freeze_panes = "A2"
+    # 2. Escribir Filas de Datos
+    for row_idx, row_data in enumerate(df.values, start_row + 1):
+        is_even = (row_idx % 2 == 0)
+        row_fill = PatternFill(start_color=COLOR_ZEBRA, end_color=COLOR_ZEBRA, fill_type="solid") if is_even else None
+
+        for col_idx, val in enumerate(row_data, 1):
+            col_name = df.columns[col_idx - 1]
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.value = _xl_safe(val)
+            cell.font = Font(name="Calibri", size=10)
+            cell.border = thin_border
+            if row_fill:
+                cell.fill = row_fill
+
+            # Alineación y Formato Numérico
+            if col_name in currency_cols:
+                cell.number_format = '"$"#,##0'
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            elif col_name in pct_cols:
+                cell.number_format = '0.0%'
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            elif isinstance(val, (int, float)):
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+            # Coloreado de Badges para Severidad / Urgencia
+            str_val = str(val).upper()
+            if str_val in SEVERITY_STYLES:
+                style = SEVERITY_STYLES[str_val]
+                cell.fill = PatternFill(start_color=style["fill"], end_color=style["fill"], fill_type="solid")
+                cell.font = Font(name="Calibri", size=10, bold=True, color=style["font"])
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        ws.row_dimensions[row_idx].height = 20
+
+    # Lineas de cuadrícula siempre visibles
+    ws.views.sheetView[0].showGridLines = True
+    ws.freeze_panes = ws.cell(row=start_row + 1, column=1)
+
+    # Auto-ajuste de columnas
+    for col in ws.columns:
+        col_letter = get_column_letter(col[0].column)
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 50)
 
 
 def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active) # Remover pestaña por defecto
+
     fin = audit.get("financials") or {}
     cal = audit.get("calidad") or {}
 
-    resumen = [
-        ("Archivo", audit.get("filename")),
-        ("Fecha de análisis", audit.get("timestamp")),
-        ("Estado de la auditoría", audit.get("estado")),
-        ("Nivel de confianza", cal.get("nivelConfianza")),
-        ("Calidad de los datos (0-100)", cal.get("data_quality_score")),
-        ("Confianza analítica (0-100)", cal.get("analytical_confidence")),
-        ("Versión del motor", audit.get("engine_version")),
-        ("", ""),
-        ("Ingresos (COP, sin duplicados exactos)", fin.get("totalIngresos")),
-        ("Costos (COP)", fin.get("totalCostos")),
-        ("Margen global % (base comparable)", fin.get("margenGlobal")),
-        ("Costos incluidos en el margen", ", ".join(fin.get("costosIncluidos") or [])),
-        ("Dinero en riesgo (COP)", fin.get("dineroEnRiesgo")),
-        ("    Posible sobrefacturación por duplicados", (fin.get("dineroEnRiesgoDetalle") or {}).get("sobrefacturacion_potencial")),
-        ("    Pérdida directa (costo > ingreso)", (fin.get("dineroEnRiesgoDetalle") or {}).get("perdida_directa")),
-        ("Filas analizadas", fin.get("filasAnalizadas")),
-        ("", ""),
-    ]
-    resumen += [("Advertencia", w) for w in audit.get("advertencias") or []]
-    resumen += [(f"Motivo ({m.get('severidad', 'INFO')})", m.get("mensaje")) for m in cal.get("motivos") or []]
+    # ---------------------------------------------------------------------------
+    # PESTAÑA 1: RESUMEN EJECUTIVO (DASHBOARD)
+    # ---------------------------------------------------------------------------
+    ws_resumen = wb.create_sheet(title="Resumen Ejecutivo")
+    
+    # Banderola de Título
+    ws_resumen.merge_cells("A1:G1")
+    title_cell = ws_resumen["A1"]
+    title_cell.value = "GENESIS CORE v1.2 — INFORME DE AUDITORÍA ECONÓMICA"
+    title_cell.font = Font(name="Calibri", size=16, bold=True, color="FFFFFF")
+    title_cell.fill = PatternFill(start_color=COLOR_HEADER_BG, end_color=COLOR_HEADER_BG, fill_type="solid")
+    title_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws_resumen.row_dimensions[1].height = 40
 
-    # --- Pestaña Hallazgos con Trazabilidad B2B ---
+    ws_resumen["A2"].value = f"Cliente / Archivo: {audit.get('filename')} | Fecha: {audit.get('timestamp')}"
+    ws_resumen["A2"].font = Font(name="Calibri", size=10, italic=True, color="475569")
+
+    # Tarjetas KPI (KPI Blocks)
+    kpis = [
+        ("TOTAL INGRESOS", fin.get("totalIngresos"), '"$"#,##0'),
+        ("TOTAL COSTOS", fin.get("totalCostos"), '"$"#,##0'),
+        ("MARGEN GLOBAL", (fin.get("margenGlobal") or 0) / 100, '0.0%'),
+        ("DINERO EN RIESGO", fin.get("dineroEnRiesgo"), '"$"#,##0'),
+    ]
+
+    card_border = Border(
+        left=Side(style="medium", color=COLOR_ACCENT),
+        right=Side(style="thin", color=COLOR_BORDER),
+        top=Side(style="thin", color=COLOR_BORDER),
+        bottom=Side(style="thin", color=COLOR_BORDER)
+    )
+
+    for i, (label, val, fmt) in enumerate(kpis):
+        col_start = 1 + (i * 2)
+        c1 = ws_resumen.cell(row=4, column=col_start)
+        c2 = ws_resumen.cell(row=5, column=col_start)
+        
+        c1.value = label
+        c1.font = Font(name="Calibri", size=9, bold=True, color="64748B")
+        c1.fill = PatternFill(start_color=COLOR_CARD_BG, end_color=COLOR_CARD_BG, fill_type="solid")
+        
+        c2.value = val
+        c2.font = Font(name="Calibri", size=14, bold=True, color=COLOR_HEADER_BG)
+        c2.number_format = fmt
+        c2.fill = PatternFill(start_color=COLOR_CARD_BG, end_color=COLOR_CARD_BG, fill_type="solid")
+
+    ws_resumen.row_dimensions[4].height = 18
+    ws_resumen.row_dimensions[5].height = 28
+
+    # Tabla de Indicadores Técnicos
+    resumen_data = [
+        ["Estado de la Auditoría", audit.get("estado")],
+        ["Nivel de Confianza Analítica", cal.get("nivelConfianza")],
+        ["Puntaje Calidad de Datos", f"{cal.get('data_quality_score')}/100"],
+        ["Confianza Analítica Calculada", f"{cal.get('analytical_confidence')}/100"],
+        ["Filas Analizadas", fin.get("filasAnalizadas")],
+        ["Duplicados Exactos Encontrados", fin.get("duplicadosExactos")],
+        ["Pérdida Directa Detectada", (fin.get("dineroEnRiesgoDetalle") or {}).get("perdida_directa")],
+        ["Versión del Motor", audit.get("engine_version")],
+    ]
+    df_resumen = pd.DataFrame(resumen_data, columns=["Métrica / Indicador", "Valor Evaluado"])
+    _apply_corporate_table(ws_resumen, start_row=8, df=df_resumen, currency_cols=["Valor Evaluado"])
+
+    # ---------------------------------------------------------------------------
+    # PESTAÑA 2: HALLAZGOS Y EVIDENCIA
+    # ---------------------------------------------------------------------------
+    ws_hallazgos = wb.create_sheet(title="Hallazgos")
     hallazgos_rows = []
     for f in findings:
         evi = f.get("evidencia") or {}
@@ -77,57 +188,52 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
         imp = f.get("impacto") or {}
         hallazgos_rows.append({
             "Prioridad": f.get("prioridad"),
-            "Tipo": f.get("tipo"),
             "Severidad": f.get("severidad"),
-            "Título": f.get("titulo"),
-            "Causa": f.get("causa"),
+            "Título del Hallazgo": f.get("titulo"),
             "Impacto (COP)": imp.get("impacto_directo"),
-            "Tipo de impacto": imp.get("descripcion"),
-            "Regla de negocio": evi.get("regla_negocio", "N/A"),
-            "Variable evaluada": evi.get("variable_evaluada", "N/A"),
-            "Benchmark esperado": evi.get("benchmark_esperado", "N/A"),
-            "Valor detectado": evi.get("valor_detectado", "N/A"),
-            "Método de análisis": evi.get("metodo"),
-            "Nivel de evidencia": evi.get("nivel_evidencia"),
-            "Casos totales": f.get("casos_total"),
+            "Tipo de Impacto": imp.get("descripcion"),
+            "Regla de Negocio": evi.get("regla_negocio", "N/A"),
+            "Variable Evaluada": evi.get("variable_evaluada", "N/A"),
+            "Benchmark Esperado": evi.get("benchmark_esperado", "N/A"),
+            "Valor Detectado": evi.get("valor_detectado", "N/A"),
             "Departamento": acc.get("departamento"),
-            "Acción sugerida": acc.get("accion"),
+            "Acción Sugerida": acc.get("accion"),
             "Urgencia": acc.get("urgencia"),
-            "Vehículos afectados": ", ".join(f.get("vehiculos_afectados") or []),
         })
-    hallazgos = pd.DataFrame(hallazgos_rows)
+    df_hallazgos = pd.DataFrame(hallazgos_rows)
+    _apply_corporate_table(ws_hallazgos, start_row=1, df=df_hallazgos, currency_cols=["Impacto (COP)"])
 
-    # --- Pestaña Casos ---
-    rows = []
-    for f in findings:
-        for c in f.get("casos") or []:
-            rows.append({"hallazgo": f"#{f.get('prioridad')} {f.get('titulo')}", **c})
-    casos = pd.DataFrame(rows)
-    if not casos.empty:
-        first = [c for c in _CASE_FIRST if c in casos.columns]
-        casos = casos[first + [c for c in casos.columns if c not in first]]
-
-    mensual = pd.DataFrame(audit.get("monthly") or [])
-
-    # --- Pestaña Tareas ---
-    tareas = pd.DataFrame([{
+    # ---------------------------------------------------------------------------
+    # PESTAÑA 3: PLAN DE ACCIÓN / TAREAS
+    # ---------------------------------------------------------------------------
+    ws_tareas = wb.create_sheet(title="Plan de Acción")
+    tareas_rows = [{
         "Tarea": t.get("title"),
         "Departamento": t.get("department"),
         "Impacto (COP)": t.get("financial_impact"),
         "Urgencia": t.get("urgency"),
         "Estado": t.get("status"),
-        "Comentario": t.get("comment") or "",
-        "Descripción": t.get("description"),
-    } for t in tasks])
+        "Acción Recomendada": t.get("description"),
+    } for t in tasks]
+    df_tareas = pd.DataFrame(tareas_rows)
+    _apply_corporate_table(ws_tareas, start_row=1, df=df_tareas, currency_cols=["Impacto (COP)"])
 
-    # --- Escritura del Libro ---
+    # ---------------------------------------------------------------------------
+    # PESTAÑA 4: SERIE MENSUAL
+    # ---------------------------------------------------------------------------
+    if audit.get("monthly"):
+        ws_mensual = wb.create_sheet(title="Serie Mensual")
+        df_mensual = pd.DataFrame(audit.get("monthly"))
+        if "margen_pct" in df_mensual.columns:
+            df_mensual["margen_pct"] = df_mensual["margen_pct"] / 100.0
+        df_mensual.rename(columns={
+            "periodo": "Periodo", "viajes": "Viajes", "ingresos": "Ingresos (COP)",
+            "costos": "Costos (COP)", "margen_pct": "Margen %"
+        }, inplace=True)
+        _apply_corporate_table(ws_mensual, start_row=1, df=df_mensual, 
+                              currency_cols=["Ingresos (COP)", "Costos (COP)"], pct_cols=["Margen %"])
+
+    # Retornar el archivo binario
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        _safe_frame(pd.DataFrame(resumen, columns=["Concepto", "Valor"])).to_excel(xw, sheet_name="Resumen", index=False)
-        _safe_frame(hallazgos).to_excel(xw, sheet_name="Hallazgos", index=False)
-        _safe_frame(casos).to_excel(xw, sheet_name="Casos", index=False)
-        _safe_frame(mensual).to_excel(xw, sheet_name="Serie mensual", index=False)
-        _safe_frame(tareas).to_excel(xw, sheet_name="Tareas", index=False)
-        for ws in xw.book.worksheets:
-            _autofit(ws)
+    wb.save(buf)
     return buf.getvalue()
