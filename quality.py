@@ -169,28 +169,30 @@ class DataQualityGate:
             add("COBERTURA_CRUCE", "MEDIA", f"El {cobertura_cruce:.0f}% de los viajes cruzó con la otra hoja; el resto queda fuera del margen.")
 
         # --- Cobertura: lo que NO entró al cálculo limita la confianza --------------------------------
-        if coverage:
-            pend = coverage["hojas_con_medidas_no_incorporadas"]
-            if pend:
-                cap = min(cap, CAP_MEDIDAS_SIN_USAR)
-                medidas = ", ".join(LABELS.get(m, m) for m in coverage["medidas_no_incorporadas"])
-                hojas_txt = ", ".join(f"«{h}»" for h in pend)
-                add("MEDIDAS_NO_INCORPORADAS", "ALTA",
-                    f"{'La hoja' if len(pend) == 1 else 'Las hojas'} {hojas_txt} "
-                    f"{'trae' if len(pend) == 1 else 'traen'} valores económicos ({medidas}) que NO entraron al cálculo. "
-                    "El resultado puede estar incompleto hasta que se puedan cruzar.")
-            econ = coverage["cobertura_economica"]
-            if econ is not None and econ < 60:
-                cap = min(cap, CAP_COBERTURA_BAJA)
-                add("COBERTURA_BAJA", "ALTA", f"Solo el {econ:.0f}% de los registros con valores económicos participó en el cálculo.")
-            otras = [h for h in coverage["hojas_no_incorporadas"] if h not in pend]
-            if otras:
-                add("HOJA_SIN_INCORPORAR", "BAJA",
-                    "Hojas de referencia sin valores económicos que no cambian el cálculo: " + ", ".join(f"«{h}»" for h in otras) + ".")
-            metricas["cobertura_hojas"] = coverage["cobertura_hojas"]
-            metricas["cobertura_economica"] = econ
+    if not coverage:
+        add("SIN_COBERTURA", "ALTA", "El pipeline no reportó cobertura; la confianza puede estar sobreestimada.")
+    else:
+        pend = coverage.get("hojas_con_medidas_no_incorporadas", [])
+        if pend:
+            cap = min(cap, CAP_MEDIDAS_SIN_USAR)
+            medidas = ", ".join(LABELS.get(m, m) for m in coverage.get("medidas_no_incorporadas", []))
+            hojas_txt = ", ".join(f"«{h}»" for h in pend)
+            add("MEDIDAS_NO_INCORPORADAS", "ALTA",
+                f"{'La hoja' if len(pend) == 1 else 'Las hojas'} {hojas_txt} "
+                f"{'trae' if len(pend) == 1 else 'traen'} valores económicos ({medidas}) que NO entraron al cálculo. "
+                "El resultado puede estar incompleto hasta que se puedan cruzar.")
+        econ = coverage.get("cobertura_economica")
+        if econ is not None and econ < 60:
+            cap = min(cap, CAP_COBERTURA_BAJA)
+            add("COBERTURA_BAJA", "ALTA", f"Solo el {econ:.0f}% de los registros con valores económicos participó en el cálculo.")
+        otras = [h for h in coverage.get("hojas_no_incorporadas", []) if h not in pend]
+        if otras:
+            add("HOJA_SIN_INCORPORAR", "BAJA",
+                "Hojas de referencia sin valores económicos que no cambian el cálculo: " + ", ".join(f"«{h}»" for h in otras) + ".")
+        metricas["cobertura_hojas"] = coverage.get("cobertura_hojas")
+        metricas["cobertura_economica"] = econ
 
-        confidence = min(confidence, cap)
+    confidence = min(confidence, cap)
         return self._result(quality, max(0.0, confidence), motivos, metricas, coverage)
 
     @staticmethod
