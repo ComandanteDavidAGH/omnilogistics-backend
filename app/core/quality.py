@@ -163,13 +163,28 @@ class DataQualityGate:
             confidence -= 8
             add("COBERTURA_CRUCE", "MEDIA", f"El {cobertura_cruce:.0f}% de los viajes cruzó con la otra hoja; el resto queda fuera del margen.")
 
-        # --- Cobertura: lo que NO entró al cálculo limita la confianza (DENTRO DE EVALUATE) ---
+        # --- Autodetección de cobertura como respaldo ---
+        if coverage is None and merge_report:
+            all_joins = merge_report.get("joins", [])
+            all_tablas = merge_report.get("tablas", [])
+            no_inc_joins = [j for j in all_joins if j.get("modo") in ("aparte", "sin_cruce")]
+            no_inc_names = [j["tabla"] for j in no_inc_joins]
+            econ_no_inc = [j["tabla"] for j in no_inc_joins if j.get("modo") == "aparte" or j.get("medidas_aportadas")]
+            medidas_no_inc = sorted({m for j in no_inc_joins for m in j.get("medidas_aportadas", [])})
+
+            coverage = {
+                "hojas_recibidas": len(all_tablas),
+                "hojas_no_incorporadas": no_inc_names,
+                "hojas_con_medidas_no_incorporadas": econ_no_inc,
+                "medidas_no_incorporadas": medidas_no_inc,
+                "cobertura_hojas": round(100 * (len(all_tablas) - len(no_inc_names)) / max(1, len(all_tablas)), 1),
+            }
+
+        # --- Evaluador de Cobertura ---
         if not coverage:
             add("SIN_COBERTURA", "ALTA", "El pipeline no reportó cobertura; la confianza puede estar sobreestimada.")
         else:
             pend = coverage.get("hojas_con_medidas_no_incorporadas", [])
-            
-            # Golpe de gracia
             if not pend and coverage.get("hojas_no_incorporadas"):
                 pend = coverage.get("hojas_no_incorporadas")
 
