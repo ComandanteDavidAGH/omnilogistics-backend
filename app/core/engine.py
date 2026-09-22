@@ -6,8 +6,7 @@ Implementa la Taxonomía Financiera Estricta B2B:
   3. DIFERENCIA_POR_RECONCILIAR: Discrepancias entre dos fuentes confiables.
   4. DESVIACIÓN_ESTADÍSTICA_ESTIMADA: Atípicos de consumo calculados.
 
-Elimina el concepto ambiguo de 'Dinero en Riesgo' general para dar
-visibilidad ejecutiva precisa a nivel C-Level.
+Mantiene compatibilidad con app/main.py incluyendo el campo 'causa'.
 """
 from __future__ import annotations
 import pandas as pd
@@ -41,7 +40,7 @@ class EconomicRuleEngine:
         desviacion_estadistica = 0.0
 
         # =========================================================================
-        # 1. SOBRECOSTO POTENCIAL (Duplicados exactos en llaves primarias y valores)
+        # 1. SOBRECOSTO POTENCIAL (Duplicados exactos)
         # =========================================================================
         dupes_mask = pd.Series(False, index=df.index)
         if "TRIP_ID" in df.columns and "VEHICLE_ID" in df.columns:
@@ -59,6 +58,7 @@ class EconomicRuleEngine:
                 "severidad": "ALTA",
                 "tipo": "SOBRECOSTO_POTENCIAL",
                 "titulo": "Posible sobrefacturación por viajes duplicados",
+                "causa": "Duplicidad exacta de registros operativos por combinación de Viaje, Vehículo e Ingreso",
                 "casos_total": len(exact_dupes) - len(unique_dupes),
                 "casos": [{"hoja": c.get("_src_sheet", "N/A"), "trip_id": c.get("TRIP_ID", ""), "ingreso": c.get("__temp_revenue", 0)} for c in casos_dup],
                 "evidencia": {
@@ -80,11 +80,10 @@ class EconomicRuleEngine:
                 }
             })
 
-        # Retiramos los duplicados excedentes del DataFrame para no inflar los P&L globales
         valid_df = df[~df.index.isin(exact_dupes.index[exact_dupes.duplicated(subset=["TRIP_ID", "VEHICLE_ID", "__temp_revenue"], keep='first')])].copy() if not exact_dupes.empty else df.copy()
 
         # =========================================================================
-        # 2. PÉRDIDA DIRECTA OBSERVADA (Costo > Ingreso en viajes purgados)
+        # 2. PÉRDIDA DIRECTA OBSERVADA (Costo > Ingreso)
         # =========================================================================
         perdida_mask = (valid_df["__temp_cost"] > valid_df["__temp_revenue"]) & (valid_df["__temp_revenue"] > 0)
         viajes_perdida = valid_df[perdida_mask].copy()
@@ -99,6 +98,7 @@ class EconomicRuleEngine:
                 "severidad": "ALTA",
                 "tipo": "PÉRDIDA_DIRECTA_OBSERVADA",
                 "titulo": "Viajes con pérdida directa (Costo supera al Ingreso)",
+                "causa": "El costo acumulado del viaje excede la tarifa facturada al cliente",
                 "casos_total": len(viajes_perdida),
                 "vehiculos_afectados": vehiculos_afectados,
                 "casos": [{"hoja": "Múltiple", "trip_id": c.get("TRIP_ID", ""), "vehiculo": c.get("VEHICLE_ID", ""), "ingreso": c.get("__temp_revenue", 0), "costo": c.get("__temp_cost", 0)} for c in casos_perdida],
@@ -122,7 +122,7 @@ class EconomicRuleEngine:
             })
 
         # =========================================================================
-        # 3. DIFERENCIA POR RECONCILIAR (Ej. Ingreso en Hoja A vs Hoja B)
+        # 3. DIFERENCIA POR RECONCILIAR (Multi-fuente)
         # =========================================================================
         if "REVENUE__alt" in valid_df.columns and "REVENUE" in valid_df.columns:
             diff = valid_df[valid_df["REVENUE"].fillna(0) != valid_df["REVENUE__alt"].fillna(0)].copy()
@@ -135,6 +135,7 @@ class EconomicRuleEngine:
                     "severidad": "MEDIA",
                     "tipo": "DIFERENCIA_POR_RECONCILIAR",
                     "titulo": "Discrepancia entre fuentes de Ingreso",
+                    "causa": "Inconsistencia de valores registrados entre fuentes paralelas de operación y facturación",
                     "casos_total": len(diff),
                     "evidencia": {
                         "regla_negocio": "Consistencia Multi-fuente",
@@ -162,7 +163,6 @@ class EconomicRuleEngine:
         total_cost = valid_df["__temp_cost"].sum()
         margen_global = ((total_rev - total_cost) / total_rev * 100) if total_rev > 0 else 0.0
         
-        # El concepto "Dinero en Riesgo" ahora es puramente la sumatoria de la taxonomía estricta
         dinero_en_riesgo_total = sobrecosto_potencial + perdida_directa_observada + diferencia_por_reconciliar + desviacion_estadistica
 
         financials = {
@@ -181,7 +181,6 @@ class EconomicRuleEngine:
             }
         }
 
-        # Serie Mensual Básica
         monthly = []
         if "TRIP_DATE" in valid_df.columns:
             monthly_df = valid_df.copy()
