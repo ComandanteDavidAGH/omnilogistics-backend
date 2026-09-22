@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 
-ENGINE_VERSION = "1.0.0"
+ENGINE_VERSION: str = "1.1.0"
 
 
 def _int(name: str, default: int) -> int:
