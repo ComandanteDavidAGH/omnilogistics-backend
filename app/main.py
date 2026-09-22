@@ -342,16 +342,6 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_
     config = config_to_dict(get_or_create_config(db, tenant_id))
     file_hash, mapping_hash, config_hash = _sha(data), _json_sha(mapping_dict), _json_sha(config)
 
-    @app.post("/api/v1/audits")
-def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_id: str = Depends(heavy_tenant),
-                 db: Session = Depends(get_db)):
-    name, data = read_upload(file)
-    mapping_dict = parse_mapping(mapping)
-    config = config_to_dict(get_or_create_config(db, tenant_id))
-    file_hash, mapping_hash, config_hash = _sha(data), _json_sha(mapping_dict), _json_sha(config)
-
-    # --- ELIMINADO EL BLOQUE DE CACHÉ / REUTILIZADO PARA EJECUTAR SIEMPRE EL MOTOR EN VIVO ---
-
     dfs = read_workbook(name, data, settings)
     outcome = clean(run_pipeline(dfs, mapping_dict, config))
 
@@ -384,7 +374,6 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_
     payload = audit_payload(db, audit)
     payload["reutilizado"] = False
     return clean(payload)
-
     dfs = read_workbook(name, data, settings)
     outcome = clean(run_pipeline(dfs, mapping_dict, config))
 
