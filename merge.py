@@ -212,6 +212,14 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
         name, right = t["name"], t["df"]
         shared = [k for k in KEYS if k in base.columns and k in right.columns]
         right_measures = _measures_in(right)
+        if not right_measures:
+            # El nombre original de la hoja está en 'name'
+            raw_df = dfs.get(name) 
+            if raw_df is not None:
+                # Buscamos medidas crudas que el usuario no mapeó
+                raw_measures = _medidas_sospechosas(raw_df, mapeadas=set(mapping.get(name, {}).keys()))
+                if raw_measures:
+                    right_measures = raw_measures
 
         if "TRIP_ID" in shared:
             mode, key = "por_viaje", "TRIP_ID"
