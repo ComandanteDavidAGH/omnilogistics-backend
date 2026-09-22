@@ -1,23 +1,20 @@
-"""Consolidación segura de hojas.
+"""Consolidación segura de hojas impulsada por el Motor de Relaciones (Relationship Engine).
 
-Reglas que evitan los errores silenciosos más comunes:
+Reglas orquestadas:
   1. Hojas con la misma estructura (p. ej. una por mes) se APILAN, no se cruzan.
-  2. Un cruce por viaje agrega primero el lado "muchos" (varias cargas de combustible por viaje se
-     suman) y valida la cardinalidad muchos-a-uno: el cruce jamás multiplica filas.
-  3. Una hoja con medidas y sin TRIP_ID NO se cruza por vehículo fila a fila (inflaría los totales);
-     se conserva aparte para el análisis por vehículo.
-  4. Todo cruce reporta su cobertura (qué porcentaje de llaves coincidió) y los registros huérfanos.
-  5. Si dos hojas aportan la misma medida (p. ej. ingreso en operación y en facturación), la segunda se
-     guarda como `<CAMPO>__alt` para conciliar en lugar de descartarse.
+  2. Un cruce por viaje agrega primero el lado "muchos" y valida la cardinalidad muchos-a-uno.
+  3. Relaciones denegadas por el RelationshipEngine (ej. costo por vehículo) se conservan intactas en la capa de análisis superior.
+  4. Todo cruce reporta su cobertura (porcentaje de coincidencia) y huérfanos.
+  5. Alternativas (ej. dos fuentes de ingresos) se renombran a <CAMPO>__alt.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-
 import pandas as pd
 
 from .model import KEYS, MEASURES
 from .parsing import normalize_key, parse_dates, parse_numeric
+from .relationships import RelationshipEngine, JoinMode
 
 
 @dataclass
@@ -162,32 +159,31 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
 
     for t in others:
         name, right = t["name"], t["df"]
-        shared = [k for k in KEYS if k in base.columns and k in right.columns]
-        right_measures = [c for c in MEASURES if c in right.columns]
+        
+        # --- NUEVO: Intervención del Motor de Relaciones ---
+        rel_report = RelationshipEngine.analyze(base, right, base_name, name)
+        mode = rel_report.join_mode.value
+        key = rel_report.primary_key_candidate
 
-        if "TRIP_ID" in shared:
-            mode, key = "por_viaje", "TRIP_ID"
-        elif shared and not right_measures:
-            mode, key = "atributos", shared[0]
-        elif "VEHICLE_ID" in shared:
-            result.secondary.append({"name": name, "df": right})
-            result.report["joins"].append({"tabla": name, "modo": "aparte", "llave": "VEHICLE_ID",
-                                           "filas_origen": len(right)})
-            warnings.append(f"La hoja '{name}' aporta {', '.join(right_measures)} pero no tiene TRIP_ID: no se "
-                            "cruzó fila a fila (multiplicaría los valores). Se usa para el análisis por vehículo.")
-            continue
-        else:
+        if mode == JoinMode.NO_JOIN.value:
             result.report["joins"].append({"tabla": name, "modo": "sin_cruce", "llave": None, "filas_origen": len(right)})
-            warnings.append(f"La hoja '{name}' no comparte una llave utilizable (TRIP_ID o placa) con '{base_name}'; "
-                            "sus datos NO se incluyeron en el análisis.")
+            warnings.append(rel_report.reason)
             continue
 
+        elif mode == JoinMode.BY_VEHICLE.value:
+            result.secondary.append({"name": name, "df": right})
+            result.report["joins"].append({"tabla": name, "modo": "aparte", "llave": key, "filas_origen": len(right)})
+            warnings.append(rel_report.reason)
+            continue
+
+        # Si el Join Engine autorizó el cruce (PER_TRIP o ATTRIBUTES), procedemos.
         with_key = right[right[key].notna()]
         if len(with_key) < len(right):
             warnings.append(f"La hoja '{name}' tiene {len(right) - len(with_key):,} filas sin {key}; no se pueden cruzar.")
+        
         agg = _aggregate(with_key, key)
         collapsed = len(with_key) - len(agg)
-        if collapsed > 0 and mode == "por_viaje":
+        if collapsed > 0 and mode == JoinMode.PER_TRIP.value:
             warnings.append(f"'{name}': {collapsed:,} registros se agregaron por {key} (suma de valores) para no "
                             "multiplicar filas al cruzar.")
 
@@ -200,6 +196,7 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
                 result.report["alternativas"][c] = name
             else:
                 drop.append(c)
+        
         agg = agg.drop(columns=drop).rename(columns=rename_alt)
         contributed = [c for c in agg.columns if c != key]
 
@@ -207,13 +204,15 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
         agg_keys = set(agg[key])
         matched = base_keys & agg_keys
         orphan = agg[~agg[key].isin(base_keys)]
+        
         rows_before = len(base)
         base = base.merge(agg, on=key, how="left", validate="m:1")
-        if len(base) != rows_before:  # no debería ocurrir; defensa en profundidad
-            raise RuntimeError(f"El cruce con '{name}' alteró el número de filas ({rows_before} -> {len(base)}).")
+        if len(base) != rows_before:
+            raise RuntimeError(f"El cruce con '{name}' alteró el número de filas ({rows_before} -> {len(base)}). Violación de la regla del 1 a muchos autorizada por el Relationship Engine.")
 
         pct_orphan = round(100 * len(agg_keys - base_keys) / max(1, len(agg_keys)), 1)
         pct_trips = round(100 * len(matched) / max(1, len(base_keys)), 1)
+        
         result.report["joins"].append({
             "tabla": name, "modo": mode, "llave": key, "filas_origen": len(right),
             "llaves_origen": len(agg_keys), "llaves_con_match": len(matched),
@@ -221,13 +220,14 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
             "medidas_aportadas": [c for c in contributed if c in MEASURES],
             "columnas_aportadas": contributed,
         })
-        if mode == "por_viaje":
+
+        if mode == JoinMode.PER_TRIP.value:
             if len(orphan):
                 result.unmatched[name] = orphan.reset_index(drop=True)
                 warnings.append(f"{len(orphan):,} de {len(agg_keys):,} llaves de '{name}' ({pct_orphan}%) no existen en "
                                 f"'{base_name}'.")
             if pct_trips < 100:
-                warnings.append(f"Solo el {pct_trips}% de los viajes de '{base_name}' tiene registro en '{name}'.")
+                warnings.append(f"Solo el {pct_trips}% de las llaves base tiene registro en '{name}'.")
 
     result.master = base.reset_index(drop=True)
     return result
