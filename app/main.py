@@ -2,8 +2,8 @@
 
 Endpoints (todos requieren X-API-Key salvo /health, /ready y /admin, que usa X-Admin-Key):
   GET    /health, /ready
-  POST   /api/v1/admin/tenants                       crea un cliente y su primera clave
-  POST   /api/v1/admin/tenants/{id}/keys             emite otra clave (rotación)
+  POST   /api/v1/admin/tenants                        crea un cliente y su primera clave
+  POST   /api/v1/admin/tenants/{id}/keys              emite otra clave (rotación)
   POST   /api/v1/admin/keys/{key_id}/revoke          revoca una clave
   GET    /api/v1/me                                  cliente actual y configuración
   PUT    /api/v1/config                              umbrales del cliente (margen mínimo, IVA...)
@@ -72,7 +72,7 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Middleware y manejo de errores (sin filtrar detalles internos al cliente)
+# Middleware y manejo de errores
 # ---------------------------------------------------------------------------
 @app.middleware("http")
 async def request_context(request: Request, call_next):
@@ -208,7 +208,6 @@ def audit_payload(db: Session, audit: AuditRecord, cases_limit: Optional[int] = 
 
 
 def remember_mapping(db: Session, tenant_id: str, mapping: dict, dfs: dict) -> None:
-    """Guarda las decisiones confirmadas para que el próximo archivo con el mismo formato entre sin preguntas."""
     for sheet, scoped in mapping.items():
         df = dfs.get(sheet)
         if df is None:
@@ -374,38 +373,6 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_
     payload = audit_payload(db, audit)
     payload["reutilizado"] = False
     return clean(payload)
-    dfs = read_workbook(name, data, settings)
-    outcome = clean(run_pipeline(dfs, mapping_dict, config))
-
-    calidad = outcome["calidad"]
-    audit = AuditRecord(
-        tenant_id=tenant_id, filename=name[:255], file_sha256=file_hash, mapping_sha256=mapping_hash,
-        config_sha256=config_hash, engine_version=ENGINE_VERSION, estado=outcome["estado"],
-        gate_level=calidad["nivelConfianza"], quality_score=calidad["data_quality_score"],
-        analytical_confidence=calidad["analytical_confidence"], mapping=mapping_dict, config_snapshot=config,
-        quality_report=calidad, financial_results=outcome["financials"], warnings=outcome["advertencias"],
-        monthly=outcome["monthly"], merge_report=outcome["merge_report"])
-    db.add(audit)
-    db.flush()
-
-    for f in outcome["findings"]:
-        row = Finding(
-            audit_id=audit.id, tenant_id=tenant_id, tipo=f["tipo"], prioridad=f["prioridad"], severidad=f["severidad"],
-            titulo=f["titulo"], causa=f["causa"], impacto=f["impacto"], evidencia=f["evidencia"], accion=f["accion"],
-            vehiculos=f["vehiculos_afectados"], casos=f["casos"], casos_total=f["casos_total"])
-        db.add(row)
-        db.flush()
-        db.add(ActionTask(
-            tenant_id=tenant_id, audit_id=audit.id, finding_id=row.id, department=f["accion"]["departamento"],
-            title=f["titulo"], description=f["accion"]["accion"], financial_impact=f["impacto"]["impacto_directo"],
-            urgency=f["accion"]["urgencia"]))
-
-    if outcome["estado"] != "BLOQUEADA":
-        remember_mapping(db, tenant_id, mapping_dict, dfs)
-    db.commit()
-    payload = audit_payload(db, audit)
-    payload["reutilizado"] = False
-    return clean(payload)
 
 
 def _get_audit(db: Session, tenant_id: str, audit_id: int) -> AuditRecord:
@@ -446,7 +413,6 @@ def export_audit(audit_id: int, tenant_id: str = Depends(heavy_tenant), db: Sess
 
 @app.delete("/api/v1/audits/{audit_id}")
 def delete_audit(audit_id: int, tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
-    """Derecho de supresión: elimina la auditoría y todo lo derivado de ella."""
     audit = _get_audit(db, tenant_id, audit_id)
     db.query(ActionTask).filter(ActionTask.audit_id == audit.id, ActionTask.tenant_id == tenant_id).delete()
     db.query(Finding).filter(Finding.audit_id == audit.id, Finding.tenant_id == tenant_id).delete()
