@@ -6,9 +6,11 @@ Reglas orquestadas:
   3. Relaciones denegadas por el RelationshipEngine (ej. costo por vehículo) se conservan intactas en la capa de análisis superior.
   4. Todo cruce reporta su cobertura (porcentaje de coincidencia) y huérfanos.
   5. Alternativas (ej. dos fuentes de ingresos) se renombran a <CAMPO>__alt.
+  6. La tabla base se puede seleccionar mediante heurística o ser dictada por el ModelBuilder.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 import pandas as pd
 
@@ -131,10 +133,14 @@ def _score_table(df: pd.DataFrame) -> tuple:
     )
 
 
-def build_master(dfs: dict, mapping: dict) -> MergeResult:
+def build_master(dfs: dict[str, pd.DataFrame], mapping: dict[str, dict], implicit_base: str | None = None) -> MergeResult:
+    """Consolida las hojas validando integridad relacional y cardinalidad."""
+    start_time = time.time()
     warnings: list = []
     stats: dict = {}
     tables = []
+    
+    # 1. Parsing y Limpieza Individual
     for sheet, df in dfs.items():
         if df.empty:
             continue
@@ -149,7 +155,13 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
                            report={"tablas": [], "joins": [], "base": None})
 
     tables = _stack_compatible(tables, warnings)
-    base_idx = max(range(len(tables)), key=lambda i: _score_table(tables[i]["df"]))
+    
+    # 2. Selección de la Tabla Base (Dictada por ModelBuilder o Heurística)
+    if implicit_base and any(t["name"] == implicit_base for t in tables):
+        base_idx = next(i for i, t in enumerate(tables) if t["name"] == implicit_base)
+    else:
+        base_idx = max(range(len(tables)), key=lambda i: _score_table(tables[i]["df"]))
+        
     base_name, base = tables[base_idx]["name"], tables[base_idx]["df"]
     others = [t for i, t in enumerate(tables) if i != base_idx]
 
@@ -157,10 +169,10 @@ def build_master(dfs: dict, mapping: dict) -> MergeResult:
                          report={"base": base_name, "tablas": [{"nombre": t["name"], "filas": len(t["df"])} for t in tables],
                                  "joins": [], "alternativas": {}})
 
+    # 3. Integración iterativa impulsada por RelationshipEngine
     for t in others:
         name, right = t["name"], t["df"]
         
-        # --- NUEVO: Intervención del Motor de Relaciones ---
         rel_report = RelationshipEngine.analyze(base, right, base_name, name)
         mode = rel_report.join_mode.value
         key = rel_report.primary_key_candidate
