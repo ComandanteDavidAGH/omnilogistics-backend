@@ -351,7 +351,8 @@ class EconomicRuleEngine:
             "nivelVehiculo": bool(veh),
         }
         return {"financials": financials, "findings": findings, "warnings": warnings,
-                "monthly": self._monthly(df, net, rev, cost)}
+                "monthly": self._monthly(df, net, rev, cost),
+                "secondary_used": set(veh["used_tables"]) if veh else set()}
 
     # -- detectores -----------------------------------------------------------------------------------
     def _revenue_outliers(self, df, net, rev, cost):
@@ -519,6 +520,7 @@ class EconomicRuleEngine:
             return None
         veh_cost = None
         included: list = []
+        used_tables: list = []
         for sec in merge.secondary:
             sdf = sec["df"]
             c, incl = compute_cost(sdf)
@@ -527,6 +529,7 @@ class EconomicRuleEngine:
             part = c.groupby(sdf["VEHICLE_ID"]).sum(min_count=1)
             veh_cost = part if veh_cost is None else veh_cost.add(part, fill_value=0)
             included += [c2 for c2 in incl if c2 not in included]
+            used_tables.append(sec["name"])
         if veh_cost is None or veh_cost.empty:
             return None
         sub = df[net & df["VEHICLE_ID"].notna()]
@@ -562,7 +565,7 @@ class EconomicRuleEngine:
                                            "costos de mantenimiento y tarifas.", "ALTA"),
                     [str(v) for v in loss.sort_values(ascending=False).head(3).index])
         return {"veh_cost": veh_cost, "veh_rev": veh_rev, "common": common, "loss": loss_total,
-                "finding": finding, "included": included}
+                "finding": finding, "included": included, "used_tables": used_tables}
 
     @staticmethod
     def _monthly(df, net, rev, cost) -> list:

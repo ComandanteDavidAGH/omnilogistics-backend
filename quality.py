@@ -1,27 +1,77 @@
-"""Compuerta de calidad: decide si los datos son suficientemente confiables para mostrar cifras.
+"""Compuerta de calidad v1.1: calidad, COBERTURA y confianza analítica.
 
-Dos ideas separadas (y ambas se reportan):
-  - data_quality_score: qué tan limpios están los datos que llegaron (0-100)
-  - analytical_confidence: qué tan sólido es el análisis que permiten (0-100)
+Tres ideas separadas (y las tres se reportan):
+  - data_quality_score: qué tan limpios están los datos que SÍ entraron al análisis (0-100)
+  - cobertura: qué parte de lo recibido entró realmente al cálculo (hojas y registros económicos)
+  - analytical_confidence: qué tan sólido es el resultado; NUNCA supera lo que permite la cobertura
 Si hay un problema bloqueante NO se calculan cifras: es preferible no mostrar nada a mostrar algo falso.
 """
 from __future__ import annotations
 
 import pandas as pd
 
-from .model import COST_COLUMNS, LABELS
+try:  # estructura de paquete
+    from .model import COST_COLUMNS, LABELS
+except ImportError:  # estructura plana
+    from model import COST_COLUMNS, LABELS
 
 UNPARSED_WARN = 0.05
 UNPARSED_BLOCK = 0.20
 MISSING_REVENUE_BLOCK = 0.50
+
+CAP_MEDIDAS_SIN_USAR = 70.0     # hay hojas con valores económicos que no entraron al cálculo -> como máximo MEDIA
+CAP_COBERTURA_BAJA = 55.0       # menos del 60 % de los registros económicos participó -> como máximo BAJA
 
 
 def _ratio(num: float, den: float) -> float:
     return (num / den) if den else 0.0
 
 
+def _pct(num: float, den: float):
+    return round(100 * num / den, 1) if den else None
+
+
+def compute_coverage(hojas: list, secondary_used=None) -> dict:
+    """Cobertura analítica a partir del estado de cada hoja recibida.
+
+    - AUXILIAR: no participa (notas, parámetros); se informa pero no penaliza.
+    - Solo importan para la confianza las hojas que traen MEDIDAS económicas (ingresos, costos, km, litros).
+    - Una hoja "secundaria" (medidas sin ID de viaje) cuenta como incorporada solo si el motor la usó de verdad.
+    """
+    secondary_used = secondary_used or set()
+    items = []
+    for h in hojas:
+        h = dict(h)
+        if h.get("secundaria") and h.get("tabla") in secondary_used:
+            h["estado"], h["rol"] = "INCORPORADA", "POR_VEHICULO"
+            h["motivo"] = "Se usó para calcular costos y margen por vehículo."
+        items.append(h)
+
+    modelables = [h for h in items if h["estado"] != "AUXILIAR"]
+    incorporadas = [h for h in modelables if h["estado"] == "INCORPORADA"]
+    no_inc = [h for h in modelables if h["estado"] != "INCORPORADA"]
+    econ = [h for h in modelables if h.get("aporta_medidas")]
+    econ_inc = [h for h in econ if h["estado"] == "INCORPORADA"]
+    econ_no_inc = [h for h in econ if h["estado"] != "INCORPORADA"]
+
+    return {
+        "hojas": items,
+        "hojas_recibidas": len(items),
+        "hojas_auxiliares": len(items) - len(modelables),
+        "hojas_modelables": len(modelables),
+        "hojas_incorporadas": len(incorporadas),
+        "hojas_no_incorporadas": [h["nombre"] for h in no_inc],
+        "hojas_con_medidas_no_incorporadas": [h["nombre"] for h in econ_no_inc],
+        "medidas_no_incorporadas": sorted({m for h in econ_no_inc for m in h.get("medidas", [])}),
+        "registros_recibidos": sum(h["filas"] for h in modelables),
+        "registros_incorporados": sum(h["filas"] for h in incorporadas),
+        "cobertura_hojas": _pct(len(incorporadas), len(modelables)),
+        "cobertura_economica": _pct(sum(h["filas"] for h in econ_inc), sum(h["filas"] for h in econ)),
+    }
+
+
 class DataQualityGate:
-    def evaluate(self, master: pd.DataFrame, parse_stats: dict, merge_report: dict) -> dict:
+    def evaluate(self, master: pd.DataFrame, parse_stats: dict, merge_report: dict, coverage=None) -> dict:
         motivos: list = []
 
         def add(codigo: str, severidad: str, mensaje: str) -> None:
@@ -29,14 +79,14 @@ class DataQualityGate:
 
         if master is None or master.empty:
             add("SIN_DATOS", "BLOQUEANTE", "Ninguna columna quedó asignada a un campo del modelo: no hay datos que analizar.")
-            return self._result(0.0, 0.0, motivos, {"filas": 0})
+            return self._result(0.0, 0.0, motivos, {"filas": 0}, coverage)
 
         n = len(master)
         cols = set(master.columns)
         cost_cols = [c for c in COST_COLUMNS if c in cols]
         has_rev = "REVENUE" in cols
 
-        # --- Métricas ---------------------------------------------------------------------------
+        # --- Métricas de limpieza (sobre lo que entró al análisis) -----------------------------------
         key_fields = [c for c in ["TRIP_ID", "REVENUE", "VEHICLE_ID", "TRIP_DATE"] + cost_cols if c in cols]
         completitud = 100 * sum(master[c].notna().mean() for c in key_fields) / len(key_fields) if key_fields else 0.0
         canon = [c for c in master.columns if not c.startswith("_src_") and not c.endswith("__alt")]
@@ -58,13 +108,13 @@ class DataQualityGate:
         metricas = {
             "filas": n, "completitud_campos_clave": round(completitud, 1), "unicidad": round(unicidad, 1),
             "cobertura_id_viaje": None if cobertura_id is None else round(cobertura_id, 1),
-            "tasa_lectura_numerica": round(tasa_lectura, 1),
-            "cobertura_cruce": cobertura_cruce,
+            "tasa_lectura_numerica": round(tasa_lectura, 1), "cobertura_cruce": cobertura_cruce,
         }
         quality = (completitud + unicidad + tasa_lectura) / 3
 
         # --- Confianza analítica ---------------------------------------------------------------------
         confidence = 100.0
+        cap = 100.0
         if not has_rev and not cost_cols:
             add("SIN_MEDIDAS", "BLOQUEANTE", "No hay columna de ingresos ni de costos asignada; no se puede calcular nada económico.")
         if not has_rev:
@@ -118,10 +168,33 @@ class DataQualityGate:
             confidence -= 8
             add("COBERTURA_CRUCE", "MEDIA", f"El {cobertura_cruce:.0f}% de los viajes cruzó con la otra hoja; el resto queda fuera del margen.")
 
-        return self._result(quality, max(0.0, confidence), motivos, metricas)
+        # --- Cobertura: lo que NO entró al cálculo limita la confianza --------------------------------
+        if coverage:
+            pend = coverage["hojas_con_medidas_no_incorporadas"]
+            if pend:
+                cap = min(cap, CAP_MEDIDAS_SIN_USAR)
+                medidas = ", ".join(LABELS.get(m, m) for m in coverage["medidas_no_incorporadas"])
+                hojas_txt = ", ".join(f"«{h}»" for h in pend)
+                add("MEDIDAS_NO_INCORPORADAS", "ALTA",
+                    f"{'La hoja' if len(pend) == 1 else 'Las hojas'} {hojas_txt} "
+                    f"{'trae' if len(pend) == 1 else 'traen'} valores económicos ({medidas}) que NO entraron al cálculo. "
+                    "El resultado puede estar incompleto hasta que se puedan cruzar.")
+            econ = coverage["cobertura_economica"]
+            if econ is not None and econ < 60:
+                cap = min(cap, CAP_COBERTURA_BAJA)
+                add("COBERTURA_BAJA", "ALTA", f"Solo el {econ:.0f}% de los registros con valores económicos participó en el cálculo.")
+            otras = [h for h in coverage["hojas_no_incorporadas"] if h not in pend]
+            if otras:
+                add("HOJA_SIN_INCORPORAR", "BAJA",
+                    "Hojas de referencia sin valores económicos que no cambian el cálculo: " + ", ".join(f"«{h}»" for h in otras) + ".")
+            metricas["cobertura_hojas"] = coverage["cobertura_hojas"]
+            metricas["cobertura_economica"] = econ
+
+        confidence = min(confidence, cap)
+        return self._result(quality, max(0.0, confidence), motivos, metricas, coverage)
 
     @staticmethod
-    def _result(quality: float, confidence: float, motivos: list, metricas: dict) -> dict:
+    def _result(quality: float, confidence: float, motivos: list, metricas: dict, coverage=None) -> dict:
         blocked = any(m["severidad"] == "BLOQUEANTE" for m in motivos)
         if blocked:
             nivel = "BLOQUEADA"
@@ -136,18 +209,6 @@ class DataQualityGate:
             blocked = True
         return {
             "scoreGlobal": round(quality, 1), "data_quality_score": round(quality, 1),
-
-          # --- Regla de Cobertura Honesta (Plan v1.1) ---
-        joins = merge_report.get("joins", [])
-        hojas_omitidas = any(j.get("modo") in ("sin_cruce", "aparte") for j in joins)
-        hojas_reporte = merge_report.get("hojas", [])
-        tiene_no_inc = any(h.get("estado") in ("NO_INCORPORADA", "AUXILIAR") for h in hojas_reporte)
-
-        if hojas_omitidas or tiene_no_inc:
-            confidence = min(confidence, 60.0)
-            add("COBERTURA_INCOMPLETA", "MEDIA", "Se detectaron hojas no integradas en el modelo. La confianza analítica se limita a 60%.")
-
-        return self._result(quality, max(0.0, confidence), motivos, metricas)
             "analytical_confidence": round(confidence, 1), "nivelConfianza": nivel,
-            "bloqueante": blocked, "motivos": motivos, "metricas": metricas,
+            "bloqueante": blocked, "motivos": motivos, "metricas": metricas, "cobertura": coverage,
         }
