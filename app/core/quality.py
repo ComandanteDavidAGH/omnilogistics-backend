@@ -1,72 +1,34 @@
-"""Compuerta de calidad v1.1: calidad, COBERTURA y confianza analítica.
+"""Quality Engine de Genesis Core v1.2.
 
-Tres ideas separadas (y las tres se reportan):
-  - data_quality_score: qué tan limpios están los datos que SÍ entraron al análisis (0-100)
-  - cobertura: qué parte de lo recibido entró realmente al cálculo (hojas y registros económicos)
-  - analytical_confidence: qué tan sólido es el resultado; NUNCA supera lo que permite la cobertura
-Si hay un problema bloqueante NO se calculan cifras: es preferible no mostrar nada a mostrar algo falso.
+Evalúa de forma independiente:
+  1. Calidad de Datos (Cleanliness): Completitud, unicidad y tasa de lectura numérica.
+  2. Integridad del Modelo (Model Integrity): Coincidencia de llaves, huérfanos y solidez de uniones.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import pandas as pd
 
-try:  # estructura de paquete
-    from .model import COST_COLUMNS, LABELS
-except ImportError:  # estructura plana
-    from model import COST_COLUMNS, LABELS
-
-UNPARSED_WARN = 0.05
-UNPARSED_BLOCK = 0.20
-MISSING_REVENUE_BLOCK = 0.50
-
-CAP_MEDIDAS_SIN_USAR = 70.0     # hay hojas con valores económicos que no entraron al cálculo -> como máximo MEDIA
-CAP_COBERTURA_BAJA = 55.0       # menos del 60 % de los registros económicos participó -> como máximo BAJA
+from .model import COST_COLUMNS, LABELS
 
 
 def _ratio(num: float, den: float) -> float:
     return (num / den) if den else 0.0
 
 
-def _pct(num: float, den: float):
-    return round(100 * num / den, 1) if den else None
+@dataclass
+class QualityReport:
+    data_quality_score: float         # 0 - 100 (Limpieza pura de datos)
+    model_integrity_score: float      # 0 - 100 (Cruce y coherencia relacional)
+    is_blocked: bool
+    motivos: list[dict]
+    metricas: dict
 
 
-def compute_coverage(hojas: list, secondary_used=None) -> dict:
-    """Cobertura analítica a partir del estado de cada hoja recibida."""
-    secondary_used = secondary_used or set()
-    items = []
-    for h in hojas:
-        h = dict(h)
-        if h.get("secundaria") and h.get("tabla") in secondary_used:
-            h["estado"], h["rol"] = "INCORPORADA", "POR_VEHICULO"
-            h["motivo"] = "Se usó para calcular costos y margen por vehículo."
-        items.append(h)
+class QualityEngine:
+    """Motor de evaluación de calidad de datos e integridad del modelo."""
 
-    modelables = [h for h in items if h["estado"] != "AUXILIAR"]
-    incorporadas = [h for h in modelables if h["estado"] == "INCORPORADA"]
-    no_inc = [h for h in modelables if h["estado"] != "INCORPORADA"]
-    econ = [h for h in modelables if h.get("aporta_medidas")]
-    econ_inc = [h for h in econ if h["estado"] == "INCORPORADA"]
-    econ_no_inc = [h for h in econ if h["estado"] != "INCORPORADA"]
-
-    return {
-        "hojas": items,
-        "hojas_recibidas": len(items),
-        "hojas_auxiliares": len(items) - len(modelables),
-        "hojas_modelables": len(modelables),
-        "hojas_incorporadas": len(incorporadas),
-        "hojas_no_incorporadas": [h["nombre"] for h in no_inc],
-        "hojas_con_medidas_no_incorporadas": [h["nombre"] for h in econ_no_inc],
-        "medidas_no_incorporadas": sorted({m for h in econ_no_inc for m in h.get("medidas", [])}),
-        "registros_recibidos": sum(h["filas"] for h in modelables),
-        "registros_incorporados": sum(h["filas"] for h in incorporadas),
-        "cobertura_hojas": _pct(len(incorporadas), len(modelables)),
-        "cobertura_economica": _pct(sum(h["filas"] for h in econ_inc), sum(h["filas"] for h in econ)),
-    }
-
-
-class DataQualityGate:
-    def evaluate(self, master: pd.DataFrame, parse_stats: dict, merge_report: dict, coverage=None) -> dict:
+    def evaluate(self, master: pd.DataFrame, parse_stats: dict, merge_report: dict) -> QualityReport:
         motivos: list = []
 
         def add(codigo: str, severidad: str, mensaje: str) -> None:
@@ -74,19 +36,24 @@ class DataQualityGate:
 
         if master is None or master.empty:
             add("SIN_DATOS", "BLOQUEANTE", "Ninguna columna quedó asignada a un campo del modelo: no hay datos que analizar.")
-            return self._result(0.0, 0.0, motivos, {"filas": 0}, coverage)
+            return QualityReport(
+                data_quality_score=0.0,
+                model_integrity_score=0.0,
+                is_blocked=True,
+                motivos=motivos,
+                metricas={"filas": 0}
+            )
 
         n = len(master)
         cols = set(master.columns)
         cost_cols = [c for c in COST_COLUMNS if c in cols]
         has_rev = "REVENUE" in cols
 
-        # --- Métricas de limpieza ---
+        # --- 1. MÈTRICAS DE LIMPIEZA DE DATOS ---
         key_fields = [c for c in ["TRIP_ID", "REVENUE", "VEHICLE_ID", "TRIP_DATE"] + cost_cols if c in cols]
         completitud = 100 * sum(master[c].notna().mean() for c in key_fields) / len(key_fields) if key_fields else 0.0
         canon = [c for c in master.columns if not c.startswith("_src_") and not c.endswith("__alt")]
         unicidad = 100 * (1 - master.duplicated(subset=canon).mean()) if canon and len(canon) >= 2 else 100.0
-        cobertura_id = 100 * master["TRIP_ID"].notna().mean() if "TRIP_ID" in cols else None
 
         def unparsed_rate(field: str) -> float:
             st = parse_stats.get(field)
@@ -97,135 +64,43 @@ class DataQualityGate:
         rev_unparsed = unparsed_rate("REVENUE") if has_rev else 0.0
         cost_unparsed = max((unparsed_rate(c) for c in cost_cols), default=0.0)
         tasa_lectura = 100 * (1 - max(rev_unparsed, cost_unparsed))
-        joins = [j for j in merge_report.get("joins", []) if j.get("modo") == "por_viaje"]
-        cobertura_cruce = min((j["pct_base_con_match"] for j in joins), default=None)
 
-        metricas = {
-            "filas": n, "completitud_campos_clave": round(completitud, 1), "unicidad": round(unicidad, 1),
-            "cobertura_id_viaje": None if cobertura_id is None else round(cobertura_id, 1),
-            "tasa_lectura_numerica": round(tasa_lectura, 1), "cobertura_cruce": cobertura_cruce,
-        }
-        quality = (completitud + unicidad + tasa_lectura) / 3
+        data_quality_score = round((completitud + unicidad + tasa_lectura) / 3, 1)
 
-        # --- Confianza analítica ---
-        confidence = 100.0
-        cap = 100.0
+        # Validación de reglas de bloqueo por datos ilegibles
         if not has_rev and not cost_cols:
             add("SIN_MEDIDAS", "BLOQUEANTE", "No hay columna de ingresos ni de costos asignada; no se puede calcular nada económico.")
-        if not has_rev:
-            confidence -= 35
-            add("SIN_INGRESO", "ALTA", "No se asignó la columna de ingresos: no se calculan ingresos ni márgenes.")
-        if not cost_cols:
-            confidence -= 25
-            add("SIN_COSTOS", "ALTA", "No se asignó ninguna columna de costos: no se calculan márgenes.")
-        if "TRIP_ID" not in cols:
-            confidence -= 20
-            add("SIN_ID_VIAJE", "MEDIA", "Sin ID de viaje no se pueden distinguir duplicados reales ni cruzar hojas por viaje.")
-        elif cobertura_id is not None and cobertura_id < 90:
-            confidence -= 10
-            add("ID_INCOMPLETO", "MEDIA", f"Solo el {cobertura_id:.0f}% de las filas tiene ID de viaje.")
-        if "VEHICLE_ID" not in cols:
-            confidence -= 5
 
         for fld, rate in [("REVENUE", rev_unparsed)] + [(c, unparsed_rate(c)) for c in cost_cols]:
-            if fld not in cols:
-                continue
-            if rate > UNPARSED_BLOCK:
+            if fld in cols and rate > 0.20:
                 add("LECTURA_NUMERICA", "BLOQUEANTE",
-                    f"El {rate:.0%} de los valores de '{LABELS[fld]}' no se pudo leer como número. Revisa el formato de la columna.")
-            elif rate > UNPARSED_WARN:
-                confidence -= 15
-                add("LECTURA_NUMERICA", "ALTA", f"El {rate:.0%} de los valores de '{LABELS[fld]}' no se pudo leer y se excluyó de los cálculos.")
+                    f"El {rate:.0%} de los valores de '{LABELS.get(fld, fld)}' no se pudo leer como número.")
 
-        if has_rev:
-            missing_rev = 1 - master["REVENUE"].notna().mean()
-            if missing_rev > MISSING_REVENUE_BLOCK:
-                add("INGRESO_VACIO", "BLOQUEANTE", f"El {missing_rev:.0%} de las filas no tiene ingreso; las cifras no serían representativas.")
-            elif missing_rev > 0.10:
-                confidence -= 10
-                add("INGRESO_INCOMPLETO", "MEDIA", f"El {missing_rev:.0%} de las filas no tiene ingreso.")
+        # --- 2. INTEGRIDAD DEL MODELO Y RELACIONES ---
+        joins = [j for j in merge_report.get("joins", []) if j.get("modo") == "por_viaje"]
+        cobertura_cruce = min((j["pct_base_con_match"] for j in joins), default=100.0)
+        cobertura_id = 100 * master["TRIP_ID"].notna().mean() if "TRIP_ID" in cols else 0.0
 
-        for fld, st in parse_stats.items():
-            if st.get("ambiguous"):
-                confidence -= 5
-                add("FORMATO_AMBIGUO", "MEDIA",
-                    f"Los números de '{LABELS.get(fld, fld)}' podrían leerse con punto o coma decimal; "
-                    "se asumió el formato colombiano (punto de miles, coma decimal). Verifica un valor.")
-        date_st = parse_stats.get("TRIP_DATE")
-        if date_st and _ratio(date_st["unparsed"], date_st["total"] - date_st["blank"]) > 0.10:
-            confidence -= 5
-            add("FECHAS_ILEGIBLES", "MEDIA", "Más del 10% de las fechas no se pudo interpretar; la serie mensual puede estar incompleta.")
+        model_integrity_score = round((cobertura_cruce * 0.6) + (cobertura_id * 0.4), 1)
 
-        if cobertura_cruce is not None and cobertura_cruce < 80:
-            confidence -= 25
-            add("COBERTURA_CRUCE", "ALTA", f"Solo el {cobertura_cruce:.0f}% de los viajes cruzó con la otra hoja; el margen es parcial.")
-        elif cobertura_cruce is not None and cobertura_cruce < 95:
-            confidence -= 8
-            add("COBERTURA_CRUCE", "MEDIA", f"El {cobertura_cruce:.0f}% de los viajes cruzó con la otra hoja; el resto queda fuera del margen.")
+        if "TRIP_ID" not in cols:
+            add("SIN_ID_VIAJE", "MEDIA", "Sin ID de viaje no se pueden distinguir duplicados reales ni cruzar hojas por viaje.")
 
-        # --- Autodetección de cobertura como respaldo ---
-        if coverage is None and merge_report:
-            all_joins = merge_report.get("joins", [])
-            all_tablas = merge_report.get("tablas", [])
-            no_inc_joins = [j for j in all_joins if j.get("modo") in ("aparte", "sin_cruce")]
-            no_inc_names = [j["tabla"] for j in no_inc_joins]
-            econ_no_inc = [j["tabla"] for j in no_inc_joins if j.get("modo") == "aparte" or j.get("medidas_aportadas")]
-            medidas_no_inc = sorted({m for j in no_inc_joins for m in j.get("medidas_aportadas", [])})
-
-            coverage = {
-                "hojas_recibidas": len(all_tablas),
-                "hojas_no_incorporadas": no_inc_names,
-                "hojas_con_medidas_no_incorporadas": econ_no_inc,
-                "medidas_no_incorporadas": medidas_no_inc,
-                "cobertura_hojas": round(100 * (len(all_tablas) - len(no_inc_names)) / max(1, len(all_tablas)), 1),
-            }
-
-        # --- Evaluador de Cobertura ---
-        if not coverage:
-            add("SIN_COBERTURA", "ALTA", "El pipeline no reportó cobertura; la confianza puede estar sobreestimada.")
-        else:
-            pend = coverage.get("hojas_con_medidas_no_incorporadas", [])
-            if not pend and coverage.get("hojas_no_incorporadas"):
-                pend = coverage.get("hojas_no_incorporadas")
-
-            if pend:
-                cap = min(cap, CAP_MEDIDAS_SIN_USAR)
-                medidas = ", ".join(LABELS.get(m, m) for m in coverage.get("medidas_no_incorporadas", []))
-                hojas_txt = ", ".join(f"«{h}»" for h in pend)
-                add("MEDIDAS_NO_INCORPORADAS", "ALTA",
-                    f"{'La hoja' if len(pend) == 1 else 'Las hojas'} {hojas_txt} "
-                    f"{'trae' if len(pend) == 1 else 'traen'} valores económicos ({medidas}) que NO entraron al cálculo. "
-                    "El resultado puede estar incompleto hasta que se puedan cruzar.")
-            econ = coverage.get("cobertura_economica")
-            if econ is not None and econ < 60:
-                cap = min(cap, CAP_COBERTURA_BAJA)
-                add("COBERTURA_BAJA", "ALTA", f"Solo el {econ:.0f}% de los registros con valores económicos participó en el cálculo.")
-            otras = [h for h in coverage.get("hojas_no_incorporadas", []) if h not in pend]
-            if otras:
-                add("HOJA_SIN_INCORPORAR", "BAJA",
-                    "Hojas de referencia sin valores económicos que no cambian el cálculo: " + ", ".join(f"«{h}»" for h in otras) + ".")
-            metricas["cobertura_hojas"] = coverage.get("cobertura_hojas")
-            metricas["cobertura_economica"] = econ
-
-        confidence = min(confidence, cap)
-        return self._result(quality, max(0.0, confidence), motivos, metricas, coverage)
-
-    @staticmethod
-    def _result(quality: float, confidence: float, motivos: list, metricas: dict, coverage=None) -> dict:
-        blocked = any(m["severidad"] == "BLOQUEANTE" for m in motivos)
-        if blocked:
-            nivel = "BLOQUEADA"
-        elif confidence >= 80:
-            nivel = "ALTA"
-        elif confidence >= 60:
-            nivel = "MEDIA"
-        elif confidence >= 40:
-            nivel = "BAJA"
-        else:
-            nivel = "BLOQUEADA"
-            blocked = True
-        return {
-            "scoreGlobal": round(quality, 1), "data_quality_score": round(quality, 1),
-            "analytical_confidence": round(confidence, 1), "nivelConfianza": nivel,
-            "bloqueante": blocked, "motivos": motivos, "metricas": metricas, "cobertura": coverage,
+        metricas = {
+            "filas": n,
+            "completitud_campos_clave": round(completitud, 1),
+            "unicidad": round(unicidad, 1),
+            "tasa_lectura_numerica": round(tasa_lectura, 1),
+            "cobertura_id_viaje": round(cobertura_id, 1),
+            "cobertura_cruce": cobertura_cruce,
         }
+
+        blocked = any(m["severidad"] == "BLOQUEANTE" for m in motivos)
+
+        return QualityReport(
+            data_quality_score=data_quality_score,
+            model_integrity_score=model_integrity_score,
+            is_blocked=blocked,
+            motivos=motivos,
+            metricas=metricas
+        )
