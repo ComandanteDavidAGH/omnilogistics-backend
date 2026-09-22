@@ -1,11 +1,11 @@
 """Exportador de Auditorías Económicas de Genesis Core v1.2.
 
 Genera libros de Excel con diseño ejecutivo gerencial:
-  - Paleta de color corporativa (Slate/Navy, gris neutro y acentos de severidad).
-  - Bloque de encabezado institucional y tarjetas KPI.
-  - Formato estricto de celdas (COP $, %, enteros).
-  - Ancho de columna dinámico y líneas de cuadrícula habilitadas.
-  - Protección contra inyección de fórmulas.
+  - Header banner institucional en cada pestaña.
+  - Títulos claros para cada tabla.
+  - Sin líneas de cuadrícula (showGridLines = False) para estética limpia.
+  - Formato de celdas (COP $, %, enteros).
+  - Ancho de columna dinámico y protección contra inyección.
 """
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ COLOR_ZEBRA = "F8FAFC"           # Gris ultra claro para filas pares
 COLOR_BORDER = "CBD5E1"          # Gris bordes suaves
 COLOR_CARD_BG = "F1F5F9"         # Fondo para tarjetas KPI
 
-# Colores para badges de severidad / urgencia
 SEVERITY_STYLES = {
     "ALTA": {"fill": "FEE2E2", "font": "991B1B"},      # Rojo suave
     "MEDIA": {"fill": "FEF3C7", "font": "92400E"},     # Ámbar suave
@@ -38,11 +37,20 @@ def _xl_safe(value):
         return "'" + value
     return value
 
-def _style_header_cell(cell, text):
-    cell.value = _xl_safe(text)
-    cell.font = Font(name="Calibri", size=11, bold=True, color=COLOR_HEADER_TEXT)
-    cell.fill = PatternFill(start_color=COLOR_HEADER_BG, end_color=COLOR_HEADER_BG, fill_type="solid")
-    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+def _add_sheet_header(ws, title_text, subtitle_text=""):
+    """Agrega un banner institucional superior en cada pestaña."""
+    ws.merge_cells("A1:J1")
+    title_cell = ws["A1"]
+    title_cell.value = title_text
+    title_cell.font = Font(name="Calibri", size=13, bold=True, color="FFFFFF")
+    title_cell.fill = PatternFill(start_color=COLOR_HEADER_BG, end_color=COLOR_HEADER_BG, fill_type="solid")
+    title_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[1].height = 36
+
+    if subtitle_text:
+        ws["A2"].value = subtitle_text
+        ws["A2"].font = Font(name="Calibri", size=10, italic=True, color="475569")
+        ws.row_dimensions[2].height = 18
 
 def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None):
     currency_cols = currency_cols or []
@@ -54,13 +62,16 @@ def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None)
         bottom=Side(style="thin", color=COLOR_BORDER)
     )
 
-    # 1. Escribir Encabezados de Tabla
+    # 1. Encabezados de Tabla
     for col_idx, col_name in enumerate(df.columns, 1):
         cell = ws.cell(row=start_row, column=col_idx)
-        _style_header_cell(cell, col_name)
+        cell.value = _xl_safe(col_name)
+        cell.font = Font(name="Calibri", size=11, bold=True, color=COLOR_HEADER_TEXT)
+        cell.fill = PatternFill(start_color=COLOR_ACCENT, end_color=COLOR_ACCENT, fill_type="solid")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[start_row].height = 26
 
-    # 2. Escribir Filas de Datos
+    # 2. Filas de Datos
     for row_idx, row_data in enumerate(df.values, start_row + 1):
         is_even = (row_idx % 2 == 0)
         row_fill = PatternFill(start_color=COLOR_ZEBRA, end_color=COLOR_ZEBRA, fill_type="solid") if is_even else None
@@ -96,8 +107,8 @@ def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None)
 
         ws.row_dimensions[row_idx].height = 20
 
-    # Lineas de cuadrícula siempre visibles
-    ws.views.sheetView[0].showGridLines = True
+    # OCULTAR LÍNEAS DE CUADRÍCULA (Gridlines OFF) para estética limpia
+    ws.views.sheetView[0].showGridLines = False
     ws.freeze_panes = ws.cell(row=start_row + 1, column=1)
 
     # Auto-ajuste de columnas
@@ -109,29 +120,18 @@ def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None)
 
 def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
     wb = openpyxl.Workbook()
-    wb.remove(wb.active) # Remover pestaña por defecto
+    wb.remove(wb.active)
 
     fin = audit.get("financials") or {}
     cal = audit.get("calidad") or {}
+    filename = audit.get('filename') or 'Auditoria'
 
     # ---------------------------------------------------------------------------
-    # PESTAÑA 1: RESUMEN EJECUTIVO (DASHBOARD)
+    # PESTAÑA 1: RESUMEN EJECUTIVO
     # ---------------------------------------------------------------------------
     ws_resumen = wb.create_sheet(title="Resumen Ejecutivo")
-    
-    # Banderola de Título
-    ws_resumen.merge_cells("A1:G1")
-    title_cell = ws_resumen["A1"]
-    title_cell.value = "GENESIS CORE v1.2 — INFORME DE AUDITORÍA ECONÓMICA"
-    title_cell.font = Font(name="Calibri", size=16, bold=True, color="FFFFFF")
-    title_cell.fill = PatternFill(start_color=COLOR_HEADER_BG, end_color=COLOR_HEADER_BG, fill_type="solid")
-    title_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-    ws_resumen.row_dimensions[1].height = 40
+    _add_sheet_header(ws_resumen, "GENESIS CORE v1.2 — RESUMEN EJECUTIVO DE AUDITORÍA", f"Archivo: {filename}")
 
-    ws_resumen["A2"].value = f"Cliente / Archivo: {audit.get('filename')} | Fecha: {audit.get('timestamp')}"
-    ws_resumen["A2"].font = Font(name="Calibri", size=10, italic=True, color="475569")
-
-    # Tarjetas KPI (KPI Blocks)
     kpis = [
         ("TOTAL INGRESOS", fin.get("totalIngresos"), '"$"#,##0'),
         ("TOTAL COSTOS", fin.get("totalCostos"), '"$"#,##0'),
@@ -139,22 +139,13 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
         ("DINERO EN RIESGO", fin.get("dineroEnRiesgo"), '"$"#,##0'),
     ]
 
-    card_border = Border(
-        left=Side(style="medium", color=COLOR_ACCENT),
-        right=Side(style="thin", color=COLOR_BORDER),
-        top=Side(style="thin", color=COLOR_BORDER),
-        bottom=Side(style="thin", color=COLOR_BORDER)
-    )
-
     for i, (label, val, fmt) in enumerate(kpis):
         col_start = 1 + (i * 2)
         c1 = ws_resumen.cell(row=4, column=col_start)
         c2 = ws_resumen.cell(row=5, column=col_start)
-        
         c1.value = label
         c1.font = Font(name="Calibri", size=9, bold=True, color="64748B")
         c1.fill = PatternFill(start_color=COLOR_CARD_BG, end_color=COLOR_CARD_BG, fill_type="solid")
-        
         c2.value = val
         c2.font = Font(name="Calibri", size=14, bold=True, color=COLOR_HEADER_BG)
         c2.number_format = fmt
@@ -163,7 +154,6 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
     ws_resumen.row_dimensions[4].height = 18
     ws_resumen.row_dimensions[5].height = 28
 
-    # Tabla de Indicadores Técnicos
     resumen_data = [
         ["Estado de la Auditoría", audit.get("estado")],
         ["Nivel de Confianza Analítica", cal.get("nivelConfianza")],
@@ -178,9 +168,10 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
     _apply_corporate_table(ws_resumen, start_row=8, df=df_resumen, currency_cols=["Valor Evaluado"])
 
     # ---------------------------------------------------------------------------
-    # PESTAÑA 2: HALLAZGOS Y EVIDENCIA
+    # PESTAÑA 2: HALLAZGOS Y TRAZABILIDAD
     # ---------------------------------------------------------------------------
     ws_hallazgos = wb.create_sheet(title="Hallazgos")
+    _add_sheet_header(ws_hallazgos, "GENESIS CORE v1.2 — MATRIZ DE HALLAZGOS Y TRAZABILIDAD", f"Archivo: {filename}")
     hallazgos_rows = []
     for f in findings:
         evi = f.get("evidencia") or {}
@@ -201,12 +192,13 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
             "Urgencia": acc.get("urgencia"),
         })
     df_hallazgos = pd.DataFrame(hallazgos_rows)
-    _apply_corporate_table(ws_hallazgos, start_row=1, df=df_hallazgos, currency_cols=["Impacto (COP)"])
+    _apply_corporate_table(ws_hallazgos, start_row=4, df=df_hallazgos, currency_cols=["Impacto (COP)"])
 
     # ---------------------------------------------------------------------------
-    # PESTAÑA 3: PLAN DE ACCIÓN / TAREAS
+    # PESTAÑA 3: PLAN DE ACCIÓN Y TAREAS
     # ---------------------------------------------------------------------------
     ws_tareas = wb.create_sheet(title="Plan de Acción")
+    _add_sheet_header(ws_tareas, "GENESIS CORE v1.2 — PLAN DE ACCIÓN Y RUTEO DE TAREAS", f"Archivo: {filename}")
     tareas_rows = [{
         "Tarea": t.get("title"),
         "Departamento": t.get("department"),
@@ -216,13 +208,14 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
         "Acción Recomendada": t.get("description"),
     } for t in tasks]
     df_tareas = pd.DataFrame(tareas_rows)
-    _apply_corporate_table(ws_tareas, start_row=1, df=df_tareas, currency_cols=["Impacto (COP)"])
+    _apply_corporate_table(ws_tareas, start_row=4, df=df_tareas, currency_cols=["Impacto (COP)"])
 
     # ---------------------------------------------------------------------------
     # PESTAÑA 4: SERIE MENSUAL
     # ---------------------------------------------------------------------------
     if audit.get("monthly"):
         ws_mensual = wb.create_sheet(title="Serie Mensual")
+        _add_sheet_header(ws_mensual, "GENESIS CORE v1.2 — TENDENCIA DE SERIE MENSUAL", f"Archivo: {filename}")
         df_mensual = pd.DataFrame(audit.get("monthly"))
         if "margen_pct" in df_mensual.columns:
             df_mensual["margen_pct"] = df_mensual["margen_pct"] / 100.0
@@ -230,10 +223,9 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
             "periodo": "Periodo", "viajes": "Viajes", "ingresos": "Ingresos (COP)",
             "costos": "Costos (COP)", "margen_pct": "Margen %"
         }, inplace=True)
-        _apply_corporate_table(ws_mensual, start_row=1, df=df_mensual, 
+        _apply_corporate_table(ws_mensual, start_row=4, df=df_mensual, 
                               currency_cols=["Ingresos (COP)", "Costos (COP)"], pct_cols=["Margen %"])
 
-    # Retornar el archivo binario
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
