@@ -1,11 +1,11 @@
 """Exportador de Auditorías Económicas de Genesis Core v1.2.
 
-Genera libros de Excel con diseño ejecutivo gerencial:
-  - Header banner institucional en cada pestaña.
-  - Títulos claros para cada tabla.
-  - Sin líneas de cuadrícula (showGridLines = False) para estética limpia.
-  - Formato de celdas (COP $, %, enteros).
-  - Ancho de columna dinámico y protección contra inyección.
+Genera libros de Excel con diseño ejecutivo gerencial C-Level:
+  - Banner institucional superior unificado en TODAS las pestañas.
+  - Título explicativo por pestaña y subtítulo con nombre del archivo/fecha.
+  - Estética limpia sin líneas de cuadrícula (showGridLines = False).
+  - Formato de celdas estricto (COP $, %, enteros).
+  - Auto-ajuste de ancho de columnas y protección contra inyección de fórmulas.
 """
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # --- PALETA CORPORATIVA GENESIS ---
-COLOR_HEADER_BG = "0F172A"       # Azul Marino Oscuro / Navy
+COLOR_HEADER_BG = "0F172A"       # Azul Marino Oscuro / Navy (Fila 1 Banner)
 COLOR_HEADER_TEXT = "FFFFFF"     # Blanco
-COLOR_ACCENT = "1E3A8A"          # Azul Corporativo
+COLOR_TABLE_HEADER = "1E3A8A"   # Azul Corporativo (Encabezado de Tabla)
 COLOR_ZEBRA = "F8FAFC"           # Gris ultra claro para filas pares
 COLOR_BORDER = "CBD5E1"          # Gris bordes suaves
 COLOR_CARD_BG = "F1F5F9"         # Fondo para tarjetas KPI
@@ -32,27 +32,34 @@ SEVERITY_STYLES = {
 
 _DANGEROUS = ("=", "+", "-", "@", "\t", "\r")
 
+
 def _xl_safe(value):
     if isinstance(value, str) and value[:1] in _DANGEROUS:
         return "'" + value
     return value
 
-def _add_sheet_header(ws, title_text, subtitle_text=""):
-    """Agrega un banner institucional superior en cada pestaña."""
-    ws.merge_cells("A1:J1")
+
+def _add_sheet_banner(ws, title_text: str, subtitle_text: str, max_col: int = 12):
+    """Crea el banner institucional estandarizado en las filas 1 y 2 de cada pestaña."""
+    col_letter = get_column_letter(max(max_col, 8))
+    ws.merge_cells(f"A1:{col_letter}1")
+    
     title_cell = ws["A1"]
-    title_cell.value = title_text
-    title_cell.font = Font(name="Calibri", size=13, bold=True, color="FFFFFF")
+    title_cell.value = _xl_safe(title_text)
+    title_cell.font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
     title_cell.fill = PatternFill(start_color=COLOR_HEADER_BG, end_color=COLOR_HEADER_BG, fill_type="solid")
     title_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-    ws.row_dimensions[1].height = 36
+    ws.row_dimensions[1].height = 38
 
-    if subtitle_text:
-        ws["A2"].value = subtitle_text
-        ws["A2"].font = Font(name="Calibri", size=10, italic=True, color="475569")
-        ws.row_dimensions[2].height = 18
+    ws.merge_cells(f"A2:{col_letter}2")
+    sub_cell = ws["A2"]
+    sub_cell.value = _xl_safe(subtitle_text)
+    sub_cell.font = Font(name="Calibri", size=10, italic=True, color="475569")
+    sub_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[2].height = 20
 
-def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None):
+
+def _apply_corporate_table(ws, start_row: int, df: pd.DataFrame, currency_cols=None, pct_cols=None):
     currency_cols = currency_cols or []
     pct_cols = pct_cols or []
     thin_border = Border(
@@ -62,12 +69,12 @@ def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None)
         bottom=Side(style="thin", color=COLOR_BORDER)
     )
 
-    # 1. Encabezados de Tabla
+    # 1. Encabezados de Tabla (Fila start_row)
     for col_idx, col_name in enumerate(df.columns, 1):
         cell = ws.cell(row=start_row, column=col_idx)
         cell.value = _xl_safe(col_name)
         cell.font = Font(name="Calibri", size=11, bold=True, color=COLOR_HEADER_TEXT)
-        cell.fill = PatternFill(start_color=COLOR_ACCENT, end_color=COLOR_ACCENT, fill_type="solid")
+        cell.fill = PatternFill(start_color=COLOR_TABLE_HEADER, end_color=COLOR_TABLE_HEADER, fill_type="solid")
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[start_row].height = 26
 
@@ -85,7 +92,7 @@ def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None)
             if row_fill:
                 cell.fill = row_fill
 
-            # Alineación y Formato Numérico
+            # Formato y alineación por tipo de columna
             if col_name in currency_cols:
                 cell.number_format = '"$"#,##0'
                 cell.alignment = Alignment(horizontal="right", vertical="center")
@@ -97,7 +104,7 @@ def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None)
             else:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
 
-            # Coloreado de Badges para Severidad / Urgencia
+            # Formato de Badges para Severidad / Urgencia
             str_val = str(val).upper()
             if str_val in SEVERITY_STYLES:
                 style = SEVERITY_STYLES[str_val]
@@ -107,31 +114,34 @@ def _apply_corporate_table(ws, start_row, df, currency_cols=None, pct_cols=None)
 
         ws.row_dimensions[row_idx].height = 20
 
-    # OCULTAR LÍNEAS DE CUADRÍCULA (Gridlines OFF) para estética limpia
+    # Desactivar líneas de cuadrícula para acabado ejecutivo limpio
     ws.views.sheetView[0].showGridLines = False
     ws.freeze_panes = ws.cell(row=start_row + 1, column=1)
 
-    # Auto-ajuste de columnas
+    # Auto-ajuste de ancho de columnas
     for col in ws.columns:
         col_letter = get_column_letter(col[0].column)
         max_len = max(len(str(cell.value or '')) for cell in col)
-        ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 50)
+        ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 55)
 
 
 def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
     wb = openpyxl.Workbook()
-    wb.remove(wb.active)
+    wb.remove(wb.active)  # Eliminar pestaña por defecto
 
     fin = audit.get("financials") or {}
     cal = audit.get("calidad") or {}
-    filename = audit.get('filename') or 'Auditoria'
+    filename = audit.get("filename") or "Auditoria"
+    timestamp = audit.get("timestamp") or ""
+    sub_info = f"Cliente / Archivo: {filename} | Fecha de Auditoría: {timestamp}"
 
     # ---------------------------------------------------------------------------
     # PESTAÑA 1: RESUMEN EJECUTIVO
     # ---------------------------------------------------------------------------
     ws_resumen = wb.create_sheet(title="Resumen Ejecutivo")
-    _add_sheet_header(ws_resumen, "GENESIS CORE v1.2 — RESUMEN EJECUTIVO DE AUDITORÍA", f"Archivo: {filename}")
+    _add_sheet_banner(ws_resumen, "GENESIS CORE v1.2 — INFORME DE AUDITORÍA ECONÓMICA", sub_info, max_col=8)
 
+    # Tarjetas KPI
     kpis = [
         ("TOTAL INGRESOS", fin.get("totalIngresos"), '"$"#,##0'),
         ("TOTAL COSTOS", fin.get("totalCostos"), '"$"#,##0'),
@@ -171,7 +181,6 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
     # PESTAÑA 2: HALLAZGOS Y TRAZABILIDAD
     # ---------------------------------------------------------------------------
     ws_hallazgos = wb.create_sheet(title="Hallazgos")
-    _add_sheet_header(ws_hallazgos, "GENESIS CORE v1.2 — MATRIZ DE HALLAZGOS Y TRAZABILIDAD", f"Archivo: {filename}")
     hallazgos_rows = []
     for f in findings:
         evi = f.get("evidencia") or {}
@@ -192,13 +201,13 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
             "Urgencia": acc.get("urgencia"),
         })
     df_hallazgos = pd.DataFrame(hallazgos_rows)
+    _add_sheet_banner(ws_hallazgos, "MATRIZ DE HALLAZGOS Y TRAZABILIDAD ECONÓMICA", sub_info, max_col=len(df_hallazgos.columns))
     _apply_corporate_table(ws_hallazgos, start_row=4, df=df_hallazgos, currency_cols=["Impacto (COP)"])
 
     # ---------------------------------------------------------------------------
     # PESTAÑA 3: PLAN DE ACCIÓN Y TAREAS
     # ---------------------------------------------------------------------------
     ws_tareas = wb.create_sheet(title="Plan de Acción")
-    _add_sheet_header(ws_tareas, "GENESIS CORE v1.2 — PLAN DE ACCIÓN Y RUTEO DE TAREAS", f"Archivo: {filename}")
     tareas_rows = [{
         "Tarea": t.get("title"),
         "Departamento": t.get("department"),
@@ -208,6 +217,7 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
         "Acción Recomendada": t.get("description"),
     } for t in tasks]
     df_tareas = pd.DataFrame(tareas_rows)
+    _add_sheet_banner(ws_tareas, "PLAN DE ACCIÓN Y RUTEO DE TAREAS POR DEPARTAMENTO", sub_info, max_col=len(df_tareas.columns))
     _apply_corporate_table(ws_tareas, start_row=4, df=df_tareas, currency_cols=["Impacto (COP)"])
 
     # ---------------------------------------------------------------------------
@@ -215,7 +225,6 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
     # ---------------------------------------------------------------------------
     if audit.get("monthly"):
         ws_mensual = wb.create_sheet(title="Serie Mensual")
-        _add_sheet_header(ws_mensual, "GENESIS CORE v1.2 — TENDENCIA DE SERIE MENSUAL", f"Archivo: {filename}")
         df_mensual = pd.DataFrame(audit.get("monthly"))
         if "margen_pct" in df_mensual.columns:
             df_mensual["margen_pct"] = df_mensual["margen_pct"] / 100.0
@@ -223,6 +232,7 @@ def build_audit_workbook(audit: dict, findings: list, tasks: list) -> bytes:
             "periodo": "Periodo", "viajes": "Viajes", "ingresos": "Ingresos (COP)",
             "costos": "Costos (COP)", "margen_pct": "Margen %"
         }, inplace=True)
+        _add_sheet_banner(ws_mensual, "SERIE MENSUAL Y TENDENCIA FINANCIERA DE LA FLOTA", sub_info, max_col=len(df_mensual.columns))
         _apply_corporate_table(ws_mensual, start_row=4, df=df_mensual, 
                               currency_cols=["Ingresos (COP)", "Costos (COP)"], pct_cols=["Margen %"])
 
