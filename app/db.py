@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text,
                         UniqueConstraint, create_engine, text)
@@ -9,6 +10,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import get_settings
 
+log = logging.getLogger("genesis.db")
 settings = get_settings()
 
 
@@ -124,20 +126,43 @@ class ActionTask(Base):
     urgency = Column(String(10))
     status = Column(String(20), default="PENDIENTE", nullable=False)
     comment = Column(Text)
-    resolved_at = Column(DateTime(timezone=True), nullable=True)     # <--- Fecha de resolución (NUEVO)
-    recovered_amount = Column(Float, nullable=True)                 # <--- Dinero recuperado (NUEVO)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)     # NUEVO
+    recovered_amount = Column(Float, nullable=True)                 # NUEVO
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 def _ensure_pilot_columns() -> None:
-    """Añade columnas nuevas a PostgreSQL en Render automáticamente sin borrar ni afectar datos anteriores."""
-    with engine.begin() as conn:
-        conn.execute(text("""
-            ALTER TABLE action_tasks 
-              ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP WITH TIME ZONE,
-              ADD COLUMN IF NOT EXISTS recovered_amount DOUBLE PRECISION;
-        """))
+    """Añade columnas nuevas al esquema existente sin Alembic.
+
+    - PostgreSQL (producción): usa ADD COLUMN IF NOT EXISTS.
+    - SQLite (dev/pruebas): usa PRAGMA table_info + ALTER TABLE sin IF NOT EXISTS.
+    En ambos casos es idempotente y no toca datos existentes.
+    """
+    dialect = engine.dialect.name
+
+    if dialect == "postgresql":
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE action_tasks "
+                "ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP WITH TIME ZONE"
+            ))
+            conn.execute(text(
+                "ALTER TABLE action_tasks "
+                "ADD COLUMN IF NOT EXISTS recovered_amount DOUBLE PRECISION"
+            ))
+        return
+
+    if dialect == "sqlite":
+        with engine.begin() as conn:
+            existing = {row[1] for row in conn.execute(text("PRAGMA table_info(action_tasks)"))}
+            if "resolved_at" not in existing:
+                conn.execute(text("ALTER TABLE action_tasks ADD COLUMN resolved_at DATETIME"))
+            if "recovered_amount" not in existing:
+                conn.execute(text("ALTER TABLE action_tasks ADD COLUMN recovered_amount REAL"))
+        return
+
+    log.warning("_ensure_pilot_columns: dialecto '%s' no soportado; se omite la migración.", dialect)
 
 
 def init_db() -> None:
