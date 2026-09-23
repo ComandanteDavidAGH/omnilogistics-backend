@@ -151,10 +151,10 @@ def parse_mapping(raw: str) -> dict:
             raise ApiError(400, "MAPEO_INVALIDO", f"El mapeo de la hoja '{sheet}' no es válido.")
         out[str(sheet)] = {}
         for col, canonical in cols.items():
-    canonical = normalize_canonical(canonical)          # ← NUEVO: traduce alias
-    if not isinstance(canonical, str) or canonical not in allowed:
-        raise ApiError(422, "CAMPO_INVALIDO", f"'{canonical}' no es un campo válido del modelo.")
-    out[str(sheet)][str(col)] = canonical
+            canonical = normalize_canonical(canonical)          # ← NUEVO: traduce alias
+            if not isinstance(canonical, str) or canonical not in allowed:
+                raise ApiError(422, "CAMPO_INVALIDO", f"'{canonical}' no es un campo válido del modelo.")
+            out[str(sheet)][str(col)] = canonical
     return out
 
 
