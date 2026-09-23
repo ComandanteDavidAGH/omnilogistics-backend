@@ -333,46 +333,12 @@ def data_understanding(file: UploadFile = File(...), tenant_id: str = Depends(he
     return clean(analysis)
 
 
-@app.post("/api/v1/audits")
-def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_id: str = Depends(heavy_tenant),
-                 db: Session = Depends(get_db)):
-    name, data = read_upload(file)
-    mapping_dict = parse_mapping(mapping)
-    config = config_to_dict(get_or_create_config(db, tenant_id))
-    file_hash, mapping_hash, config_hash = _sha(data), _json_sha(mapping_dict), _json_sha(config)
-
-    dfs = read_workbook(name, data, settings)
-    outcome = clean(run_pipeline(dfs, mapping_dict, config))
-
-    calidad = outcome["calidad"]
-    audit = AuditRecord(
-        tenant_id=tenant_id, filename=name[:255], file_sha256=file_hash, mapping_sha256=mapping_hash,
-        config_sha256=config_hash, engine_version=ENGINE_VERSION, estado=outcome["estado"],
-        gate_level=calidad["nivelConfianza"], quality_score=calidad["data_quality_score"],
-        analytical_confidence=calidad["analytical_confidence"], mapping=mapping_dict, config_snapshot=config,
-        quality_report=calidad, financial_results=outcome["financials"], warnings=outcome["advertencias"],
-        monthly=outcome["monthly"], merge_report=outcome["merge_report"])
-    db.add(audit)
-    db.flush()
-
-    for f in outcome["findings"]:
-        row = Finding(
-            audit_id=audit.id, tenant_id=tenant_id, tipo=f["tipo"], prioridad=f["prioridad"], severidad=f["severidad"],
-            titulo=f["titulo"], causa=f["causa"], impacto=f["impacto"], evidencia=f["evidencia"], accion=f["accion"],
-            vehiculos=f["vehiculos_afectados"], casos=f["casos"], casos_total=f["casos_total"])
-        db.add(row)
-        db.flush()
-        db.add(ActionTask(
-            tenant_id=tenant_id, audit_id=audit.id, finding_id=row.id, department=f["accion"]["departamento"],
-            title=f["titulo"], description=f["accion"]["accion"], financial_impact=f["impacto"]["impacto_directo"],
-            urgency=f["accion"]["urgencia"]))
-
-    if outcome["estado"] != "BLOQUEADA":
-        remember_mapping(db, tenant_id, mapping_dict, dfs)
-    db.commit()
-    payload = audit_payload(db, audit)
-    payload["reutilizado"] = False
-    return clean(payload)
+createAudit: (apiKey, file, mapping, forzar = false) => {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('mapping', JSON.stringify(mapping));
+  return request(`/api/v1/audits${forzar ? '?forzar=true' : ''}`, { method: 'POST', apiKey, form });
+},
 
 
 def _get_audit(db: Session, tenant_id: str, audit_id: int) -> AuditRecord:
