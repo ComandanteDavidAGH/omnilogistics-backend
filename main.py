@@ -34,7 +34,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import ENGINE_VERSION, get_settings
 from .core.ingestion import read_workbook
-from .core.model import CANONICAL_IDS
+from .core.model import CANONICAL_IDS, normalize_canonical
 from .core.pipeline import run_pipeline
 from .core.semantic import GenesisDataUnderstanding, sheet_signature
 from .core.serialize import clean
@@ -151,9 +151,10 @@ def parse_mapping(raw: str) -> dict:
             raise ApiError(400, "MAPEO_INVALIDO", f"El mapeo de la hoja '{sheet}' no es válido.")
         out[str(sheet)] = {}
         for col, canonical in cols.items():
-            if not isinstance(canonical, str) or canonical not in allowed:
-                raise ApiError(422, "CAMPO_INVALIDO", f"'{canonical}' no es un campo válido del modelo.")
-            out[str(sheet)][str(col)] = canonical
+    canonical = normalize_canonical(canonical)          # ← NUEVO: traduce alias
+    if not isinstance(canonical, str) or canonical not in allowed:
+        raise ApiError(422, "CAMPO_INVALIDO", f"'{canonical}' no es un campo válido del modelo.")
+    out[str(sheet)][str(col)] = canonical
     return out
 
 
