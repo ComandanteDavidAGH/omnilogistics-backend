@@ -237,3 +237,18 @@ FIELDS: dict[str, dict] = {
 }
 
 LITROS_POR_GALON: float = 3.78541
+# ---------------------------------------------------------------------------
+# 5. COMPATIBILIDAD ENTRE VERSIONES (v1.1 → v1.2)
+# ---------------------------------------------------------------------------
+# Cuando renombramos un campo canónico, los mapeos guardados en memoria y el
+# frontend siguen enviando el nombre viejo. Este diccionario traduce sin romper.
+CANONICAL_ALIASES: dict[str, str] = {
+    "COST_TOLL": "COST_TOLLS",   # v1.1 lo llamaba COST_TOLL
+}
+
+
+def normalize_canonical(name: str) -> str:
+    """Traduce nombres antiguos al nombre canónico actual de v1.2."""
+    if not isinstance(name, str):
+        return name
+    return CANONICAL_ALIASES.get(name, name)
