@@ -2,8 +2,8 @@
 
 Endpoints (todos requieren X-API-Key salvo /health, /ready y /admin, que usa X-Admin-Key):
   GET    /health, /ready
-  POST   /api/v1/admin/tenants                        crea un cliente y su primera clave
-  POST   /api/v1/admin/tenants/{id}/keys              emite otra clave (rotación)
+  POST   /api/v1/admin/tenants                       crea un cliente y su primera clave
+  POST   /api/v1/admin/tenants/{id}/keys             emite otra clave (rotación)
   POST   /api/v1/admin/keys/{key_id}/revoke          revoca una clave
   GET    /api/v1/me                                  cliente actual y configuración
   PUT    /api/v1/config                              umbrales del cliente (margen mínimo, IVA...)
@@ -333,12 +333,77 @@ def data_understanding(file: UploadFile = File(...), tenant_id: str = Depends(he
     return clean(analysis)
 
 
-createAudit: (apiKey, file, mapping, forzar = false) => {
-  const form = new FormData();
-  form.append('file', file);
-  form.append('mapping', JSON.stringify(mapping));
-  return request(`/api/v1/audits${forzar ? '?forzar=true' : ''}`, { method: 'POST', apiKey, form });
-},
+@app.post("/api/v1/audits")
+def create_audit(file: UploadFile = File(...), mapping: str = Form(...), forzar: bool = Query(False),
+                 tenant_id: str = Depends(heavy_tenant), db: Session = Depends(get_db)):
+    filename, data = read_upload(file)
+    file_sha = _sha(data)
+    dfs = read_workbook(filename, data, settings)
+    parsed_mapping = parse_mapping(mapping)
+    config = config_to_dict(get_or_create_config(db, tenant_id))
+
+    remember_mapping(db, tenant_id, parsed_mapping, dfs)
+    result = run_pipeline(dfs, parsed_mapping, config)
+
+    calidad = result.get("calidad") or {}
+    gate_level = calidad.get("nivelConfianza", "DESCONOCIDO")
+
+    audit = AuditRecord(
+        tenant_id=tenant_id,
+        filename=filename,
+        file_sha256=file_sha,
+        engine_version=ENGINE_VERSION,
+        estado=result.get("estado", "OK"),
+        quality_report=calidad,
+        gate_level=gate_level,
+        financial_results=result.get("financials"),
+        warnings=result.get("advertencias", []),
+        monthly=result.get("monthly", []),
+        merge_report=result.get("merge_report", {}),
+        config_snapshot=config
+    )
+    db.add(audit)
+    db.flush()
+
+    # Guardar hallazgos de forma limpia y defensiva (previene KeyError)
+    for f in result.get("findings", []):
+        accion = f.get("accion") or {}
+        finding_row = Finding(
+            tenant_id=tenant_id,
+            audit_id=audit.id,
+            tipo=f.get("tipo", "OBSERVACION"),
+            prioridad=f.get("prioridad", 1),
+            severidad=f.get("severidad", "BAJA"),
+            titulo=f.get("titulo", "Hallazgo"),
+            causa=f.get("causa", "Causa no especificada"),
+            impacto=f.get("impacto", {}),
+            evidencia=f.get("evidencia", {}),
+            accion=accion,
+            vehiculos=f.get("vehiculos_afectados", []),
+            casos=f.get("casos", []),
+            casos_total=f.get("casos_total", 0)
+        )
+        db.add(finding_row)
+        db.flush()
+
+        if accion and accion.get("accion"):
+            imp = f.get("impacto") or {}
+            task_row = ActionTask(
+                tenant_id=tenant_id,
+                audit_id=audit.id,
+                finding_id=finding_row.id,
+                department=accion.get("departamento", "General"),
+                title=f.get("titulo", "Acción recomendada"),
+                description=accion.get("accion", ""),
+                financial_impact=float(imp.get("impacto_directo", 0.0)),
+                urgency=accion.get("urgencia", "MEDIA"),
+                status="PENDIENTE"
+            )
+            db.add(task_row)
+
+    db.commit()
+    db.refresh(audit)
+    return clean(audit_payload(db, audit))
 
 
 def _get_audit(db: Session, tenant_id: str, audit_id: int) -> AuditRecord:
