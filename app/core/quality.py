@@ -10,10 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-try:  # estructura de paquete
-    from .model import COST_COLUMNS, LABELS
-except ImportError:  # estructura plana
-    from model import COST_COLUMNS, LABELS
+from .model import COST_COLUMNS, LABELS
 
 UNPARSED_WARN = 0.05
 UNPARSED_BLOCK = 0.20
@@ -32,12 +29,6 @@ def _pct(num: float, den: float):
 
 
 def compute_coverage(hojas: list, secondary_used=None) -> dict:
-    """Cobertura analítica a partir del estado de cada hoja recibida.
-
-    - AUXILIAR: no participa (notas, parámetros); se informa pero no penaliza.
-    - Solo importan para la confianza las hojas que traen MEDIDAS económicas (ingresos, costos, km, litros).
-    - Una hoja "secundaria" (medidas sin ID de viaje) cuenta como incorporada solo si el motor la usó de verdad.
-    """
     secondary_used = secondary_used or set()
     items = []
     for h in hojas:
@@ -86,7 +77,6 @@ class DataQualityGate:
         cost_cols = [c for c in COST_COLUMNS if c in cols]
         has_rev = "REVENUE" in cols
 
-        # --- Métricas de limpieza (sobre lo que entró al análisis) -----------------------------------
         key_fields = [c for c in ["TRIP_ID", "REVENUE", "VEHICLE_ID", "TRIP_DATE"] + cost_cols if c in cols]
         completitud = 100 * sum(master[c].notna().mean() for c in key_fields) / len(key_fields) if key_fields else 0.0
         canon = [c for c in master.columns if not c.startswith("_src_") and not c.endswith("__alt")]
@@ -112,7 +102,6 @@ class DataQualityGate:
         }
         quality = (completitud + unicidad + tasa_lectura) / 3
 
-        # --- Confianza analítica ---------------------------------------------------------------------
         confidence = 100.0
         cap = 100.0
         if not has_rev and not cost_cols:
@@ -168,7 +157,6 @@ class DataQualityGate:
             confidence -= 8
             add("COBERTURA_CRUCE", "MEDIA", f"El {cobertura_cruce:.0f}% de los viajes cruzó con la otra hoja; el resto queda fuera del margen.")
 
-        # --- Cobertura: lo que NO entró al cálculo limita la confianza --------------------------------
         if coverage:
             pend = coverage["hojas_con_medidas_no_incorporadas"]
             if pend:
