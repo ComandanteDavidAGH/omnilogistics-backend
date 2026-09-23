@@ -16,7 +16,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-from .model import FIELDS, CANONICAL_IDS
+from .model import FIELDS, CANONICAL_IDS, normalize_canonical
 from .parsing import date_success_rate, normalize_text, numeric_success_rate
 
 AUTO_THRESHOLD = 0.85
@@ -149,7 +149,7 @@ class GenesisDataUnderstanding:
             samples = _samples(df[col])
 
             if remembered and col in remembered:
-                canonical = remembered[col]
+                canonical = normalize_canonical(remembered[col])   # ← NUEVO: traduce alias
                 if canonical in CANONICAL_IDS:
                     analysis["fields_mapping"][col] = {"canonical": canonical, "confidence": 1.0,
                                                        "detected_type": actual, "source": "memoria",
