@@ -7,9 +7,13 @@ Reglas que evitan los errores silenciosos más comunes:
   3. Una hoja con medidas y sin TRIP_ID NO se cruza por vehículo fila a fila (inflaría los totales).
   4. Todo cruce reporta su cobertura (qué porcentaje de llaves coincidió) y los registros huérfanos.
   5. Si dos hojas aportan la misma medida, la segunda se guarda como `<CAMPO>__alt` para conciliar.
-  6. NUEVO: cada hoja recibida queda registrada en report["hojas"] con su estado
+  6. Cada hoja recibida queda registrada en report["hojas"] con su estado
      (INCORPORADA / NO_INCORPORADA / AUXILIAR) y el motivo. La compuerta de calidad usa esto
      para que la confianza nunca sea 100 % si quedaron datos económicos sin usar.
+  7. La detección de "medidas" no depende solo de MEASURES: también reconoce cualquier columna
+     canónica con prefijo económico (REVENUE, COST_, VOLUME_, DISTANCE_...) y naturaleza numérica.
+     Esto evita que una hoja con dinero quede clasificada como "sin medidas" cuando el campo
+     canónico no está formalmente en MEASURES.
 """
 from __future__ import annotations
 
@@ -23,6 +27,11 @@ try:  # estructura de paquete (app/core/...)
 except ImportError:  # estructura plana (archivos sueltos en una carpeta)
     from model import KEYS, MEASURES
     from parsing import normalize_key, parse_dates, parse_numeric
+
+
+# Prefijos y fragmentos que identifican una columna canónica como económica,
+# aunque no esté listada explícitamente en MEASURES.
+_PREFIJOS_ECON = ("REVENUE", "COST_", "VOLUME_", "DISTANCE_", "LITERS", "GAL_", "KM_", "AMOUNT", "PRICE")
 
 
 @dataclass
@@ -81,7 +90,24 @@ def _canon_cols(df: pd.DataFrame) -> set:
 
 
 def _measures_in(df: pd.DataFrame) -> list:
-    return [c for c in MEASURES if c in df.columns]
+    """Detecta columnas canónicas con naturaleza económica.
+
+    No se limita a MEASURES: si una columna canónica se llama VOLUME_LTS, COST_*,
+    REVENUE, DISTANCE_* o similar y es numérica, cuenta como medida. Esto evita
+    que una hoja con dinero quede como "sin medidas" sólo porque el canónico
+    no esté en la lista formal.
+    """
+    found: list = []
+    for c in df.columns:
+        if c.startswith("_src_") or c.endswith("__alt"):
+            continue
+        if c in MEASURES:
+            found.append(c)
+            continue
+        if any(c.startswith(p) or p in c for p in _PREFIJOS_ECON):
+            if pd.api.types.is_numeric_dtype(df[c]):
+                found.append(c)
+    return found
 
 
 def _parallel_sources(existing: list, other: pd.DataFrame) -> bool:
