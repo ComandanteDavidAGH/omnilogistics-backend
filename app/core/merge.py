@@ -1,22 +1,28 @@
-"""Consolidación segura de hojas impulsada por el Motor de Relaciones (Relationship Engine).
+"""Consolidación segura de hojas (v1.1: con registro del rol de CADA hoja para medir cobertura).
 
-Reglas orquestadas:
+Reglas que evitan los errores silenciosos más comunes:
   1. Hojas con la misma estructura (p. ej. una por mes) se APILAN, no se cruzan.
-  2. Un cruce por viaje agrega primero el lado "muchos" y valida la cardinalidad muchos-a-uno.
-  3. Relaciones denegadas por el RelationshipEngine (ej. costo por vehículo) se conservan intactas en la capa de análisis superior.
-  4. Todo cruce reporta su cobertura (porcentaje de coincidencia) y huérfanos.
-  5. Alternativas (ej. dos fuentes de ingresos) se renombran a <CAMPO>__alt.
-  6. La tabla base se puede seleccionar mediante heurística o ser dictada por el ModelBuilder.
+  2. Un cruce por viaje agrega primero el lado "muchos" (varias cargas de combustible por viaje se
+     suman) y valida la cardinalidad muchos-a-uno: el cruce jamás multiplica filas.
+  3. Una hoja con medidas y sin TRIP_ID NO se cruza por vehículo fila a fila (inflaría los totales).
+  4. Todo cruce reporta su cobertura (qué porcentaje de llaves coincidió) y los registros huérfanos.
+  5. Si dos hojas aportan la misma medida, la segunda se guarda como `<CAMPO>__alt` para conciliar.
+  6. NUEVO: cada hoja recibida queda registrada en report["hojas"] con su estado
+     (INCORPORADA / NO_INCORPORADA / AUXILIAR) y el motivo. La compuerta de calidad usa esto
+     para que la confianza nunca sea 100 % si quedaron datos económicos sin usar.
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
+
 import pandas as pd
 
-from .model import KEYS, MEASURES
-from .parsing import normalize_key, parse_dates, parse_numeric
-from .relationships import RelationshipEngine, JoinMode
+try:  # estructura de paquete (app/core/...)
+    from .model import KEYS, MEASURES
+    from .parsing import normalize_key, parse_dates, parse_numeric
+except ImportError:  # estructura plana (archivos sueltos en una carpeta)
+    from model import KEYS, MEASURES
+    from parsing import normalize_key, parse_dates, parse_numeric
 
 
 @dataclass
@@ -74,6 +80,10 @@ def _canon_cols(df: pd.DataFrame) -> set:
     return {c for c in df.columns if not c.startswith("_src_") and not c.endswith("__alt")}
 
 
+def _measures_in(df: pd.DataFrame) -> list:
+    return [c for c in MEASURES if c in df.columns]
+
+
 def _parallel_sources(existing: list, other: pd.DataFrame) -> bool:
     """Dos hojas con los mismos viajes son fuentes paralelas (operación vs. facturación), no periodos."""
     if "TRIP_ID" not in other.columns or not any("TRIP_ID" in d.columns for d in existing):
@@ -94,10 +104,11 @@ def _stack_compatible(tables: list, warnings: list) -> list:
             if union and len(cols & g["cols"]) / len(union) >= 0.8 and not _parallel_sources(g["dfs"], t["df"]):
                 g["names"].append(t["name"])
                 g["dfs"].append(t["df"])
+                g["rows"].update(t["rows"])
                 g["cols"] |= cols
                 break
         else:
-            groups.append({"names": [t["name"]], "dfs": [t["df"]], "cols": set(cols)})
+            groups.append({"names": [t["name"]], "dfs": [t["df"]], "rows": dict(t["rows"]), "cols": set(cols)})
 
     result = []
     for g in groups:
@@ -107,7 +118,7 @@ def _stack_compatible(tables: list, warnings: list) -> list:
                             f"apilaron como un solo periodo continuo ({len(stacked):,} filas).")
         else:
             stacked = g["dfs"][0].reset_index(drop=True)
-        result.append({"name": " + ".join(g["names"]), "df": stacked})
+        result.append({"name": " + ".join(g["names"]), "df": stacked, "sheets": list(g["names"]), "rows": g["rows"]})
     return result
 
 
@@ -133,69 +144,86 @@ def _score_table(df: pd.DataFrame) -> tuple:
     )
 
 
-def build_master(dfs: dict[str, pd.DataFrame], mapping: dict[str, dict], implicit_base: str | None = None) -> MergeResult:
-    """Consolida las hojas validando integridad relacional y cardinalidad."""
-    start_time = time.time()
+def _mark(hojas: list, table: dict, estado: str, rol: str, motivo: str, measures: list, secundaria: bool = False) -> None:
+    """Registra el estado de cada hoja de origen que compone esta tabla."""
+    for sheet in table["sheets"]:
+        hojas.append({
+            "nombre": sheet, "filas": int(table["rows"].get(sheet, 0)), "tabla": table["name"],
+            "estado": estado, "rol": rol, "motivo": motivo, "medidas": list(measures),
+            "aporta_medidas": bool(measures), "secundaria": secundaria,
+        })
+
+
+def build_master(dfs: dict, mapping: dict) -> MergeResult:
     warnings: list = []
     stats: dict = {}
+    hojas: list = []
     tables = []
-    
-    # 1. Parsing y Limpieza Individual
     for sheet, df in dfs.items():
         if df.empty:
             continue
         table = _canonical_table(sheet, df, mapping.get(sheet, {}) or {}, warnings, stats)
         if table is None:
-            warnings.append(f"La hoja '{sheet}' se omitió: ninguna de sus columnas quedó asignada a un campo.")
+            hojas.append({"nombre": sheet, "filas": int(len(df)), "tabla": sheet, "estado": "AUXILIAR", "rol": "AUXILIAR",
+                          "motivo": "No participa en el modelo: ninguna de sus columnas quedó asignada a un campo "
+                                    "(hoja de control, notas o parámetros).",
+                          "medidas": [], "aporta_medidas": False, "secundaria": False})
+            warnings.append(f"La hoja '{sheet}' se trató como auxiliar: no participa en el modelo económico.")
             continue
-        tables.append({"name": sheet, "df": table})
+        tables.append({"name": sheet, "df": table, "sheets": [sheet], "rows": {sheet: len(df)}})
 
     if not tables:
         return MergeResult(master=pd.DataFrame(), warnings=warnings, parse_stats=stats,
-                           report={"tablas": [], "joins": [], "base": None})
+                           report={"tablas": [], "joins": [], "base": None, "hojas": hojas})
 
     tables = _stack_compatible(tables, warnings)
-    
-    # 2. Selección de la Tabla Base (Dictada por ModelBuilder o Heurística)
-    if implicit_base and any(t["name"] == implicit_base for t in tables):
-        base_idx = next(i for i, t in enumerate(tables) if t["name"] == implicit_base)
-    else:
-        base_idx = max(range(len(tables)), key=lambda i: _score_table(tables[i]["df"]))
-        
-    base_name, base = tables[base_idx]["name"], tables[base_idx]["df"]
+    base_idx = max(range(len(tables)), key=lambda i: _score_table(tables[i]["df"]))
+    base_t = tables[base_idx]
+    base_name, base = base_t["name"], base_t["df"]
     others = [t for i, t in enumerate(tables) if i != base_idx]
+
+    _mark(hojas, base_t, "INCORPORADA", "BASE" if len(base_t["sheets"]) == 1 else "BASE_APILADA",
+          "Hoja principal del análisis." if len(base_t["sheets"]) == 1
+          else "Hojas con la misma estructura apiladas como hoja principal.", _measures_in(base))
 
     result = MergeResult(master=base, warnings=warnings, parse_stats=stats,
                          report={"base": base_name, "tablas": [{"nombre": t["name"], "filas": len(t["df"])} for t in tables],
-                                 "joins": [], "alternativas": {}})
+                                 "joins": [], "alternativas": {}, "hojas": hojas})
 
-    # 3. Integración iterativa impulsada por RelationshipEngine
     for t in others:
         name, right = t["name"], t["df"]
-        
-        rel_report = RelationshipEngine.analyze(base, right, base_name, name)
-        mode = rel_report.join_mode.value
-        key = rel_report.primary_key_candidate
+        shared = [k for k in KEYS if k in base.columns and k in right.columns]
+        right_measures = _measures_in(right)
 
-        if mode == JoinMode.NO_JOIN.value:
-            result.report["joins"].append({"tabla": name, "modo": "sin_cruce", "llave": None, "filas_origen": len(right)})
-            warnings.append(rel_report.reason)
-            continue
-
-        elif mode == JoinMode.BY_VEHICLE.value:
+        if "TRIP_ID" in shared:
+            mode, key = "por_viaje", "TRIP_ID"
+        elif shared and not right_measures:
+            mode, key = "atributos", shared[0]
+        elif "VEHICLE_ID" in shared:
             result.secondary.append({"name": name, "df": right})
-            result.report["joins"].append({"tabla": name, "modo": "aparte", "llave": key, "filas_origen": len(right)})
-            warnings.append(rel_report.reason)
+            result.report["joins"].append({"tabla": name, "modo": "aparte", "llave": "VEHICLE_ID",
+                                           "filas_origen": len(right)})
+            _mark(hojas, t, "NO_INCORPORADA", "SIN_ID_DE_VIAJE",
+                  f"Aporta {', '.join(right_measures)} pero no tiene ID de viaje: no se puede cruzar fila a fila "
+                  "sin multiplicar los valores.", right_measures, secundaria=True)
+            warnings.append(f"La hoja '{name}' aporta {', '.join(right_measures)} pero no tiene TRIP_ID: no se cruzó "
+                            "fila a fila (multiplicaría los valores). Se usa para el análisis por vehículo.")
+            continue
+        else:
+            result.report["joins"].append({"tabla": name, "modo": "sin_cruce", "llave": None, "filas_origen": len(right)})
+            _mark(hojas, t, "NO_INCORPORADA", "SIN_CRUCE",
+                  "No comparte ID de viaje ni placa con la hoja base. Asigna una de esas columnas para poder cruzarla.",
+                  right_measures)
+            warnings.append(f"La hoja '{name}' no comparte una llave utilizable (TRIP_ID o placa) con '{base_name}'; "
+                            "sus datos NO se incluyeron en el análisis.")
             continue
 
-        # Si el Join Engine autorizó el cruce (PER_TRIP o ATTRIBUTES), procedemos.
         with_key = right[right[key].notna()]
         if len(with_key) < len(right):
             warnings.append(f"La hoja '{name}' tiene {len(right) - len(with_key):,} filas sin {key}; no se pueden cruzar.")
-        
         agg = _aggregate(with_key, key)
         collapsed = len(with_key) - len(agg)
-        if collapsed > 0 and mode == JoinMode.PER_TRIP.value:
+        if collapsed > 0 and mode == "por_viaje":
             warnings.append(f"'{name}': {collapsed:,} registros se agregaron por {key} (suma de valores) para no "
                             "multiplicar filas al cruzar.")
 
@@ -208,7 +236,6 @@ def build_master(dfs: dict[str, pd.DataFrame], mapping: dict[str, dict], implici
                 result.report["alternativas"][c] = name
             else:
                 drop.append(c)
-        
         agg = agg.drop(columns=drop).rename(columns=rename_alt)
         contributed = [c for c in agg.columns if c != key]
 
@@ -216,15 +243,13 @@ def build_master(dfs: dict[str, pd.DataFrame], mapping: dict[str, dict], implici
         agg_keys = set(agg[key])
         matched = base_keys & agg_keys
         orphan = agg[~agg[key].isin(base_keys)]
-        
         rows_before = len(base)
         base = base.merge(agg, on=key, how="left", validate="m:1")
-        if len(base) != rows_before:
-            raise RuntimeError(f"El cruce con '{name}' alteró el número de filas ({rows_before} -> {len(base)}). Violación de la regla del 1 a muchos autorizada por el Relationship Engine.")
+        if len(base) != rows_before:  # no debería ocurrir; defensa en profundidad
+            raise RuntimeError(f"El cruce con '{name}' alteró el número de filas ({rows_before} -> {len(base)}).")
 
         pct_orphan = round(100 * len(agg_keys - base_keys) / max(1, len(agg_keys)), 1)
         pct_trips = round(100 * len(matched) / max(1, len(base_keys)), 1)
-        
         result.report["joins"].append({
             "tabla": name, "modo": mode, "llave": key, "filas_origen": len(right),
             "llaves_origen": len(agg_keys), "llaves_con_match": len(matched),
@@ -232,14 +257,21 @@ def build_master(dfs: dict[str, pd.DataFrame], mapping: dict[str, dict], implici
             "medidas_aportadas": [c for c in contributed if c in MEASURES],
             "columnas_aportadas": contributed,
         })
-
-        if mode == JoinMode.PER_TRIP.value:
+        if mode == "por_viaje":
+            _mark(hojas, t, "INCORPORADA", "CRUZADA_POR_VIAJE",
+                  f"Cruzada por ID de viaje: el {pct_trips}% de los viajes tiene registro aquí.", right_measures)
             if len(orphan):
                 result.unmatched[name] = orphan.reset_index(drop=True)
                 warnings.append(f"{len(orphan):,} de {len(agg_keys):,} llaves de '{name}' ({pct_orphan}%) no existen en "
                                 f"'{base_name}'.")
             if pct_trips < 100:
-                warnings.append(f"Solo el {pct_trips}% de las llaves base tiene registro en '{name}'.")
+                warnings.append(f"Solo el {pct_trips}% de los viajes de '{base_name}' tiene registro en '{name}'.")
+        else:
+            if contributed:
+                _mark(hojas, t, "INCORPORADA", "ATRIBUTOS", f"Enlazada por {key} para agregar atributos.", right_measures)
+            else:
+                _mark(hojas, t, "NO_INCORPORADA", "SIN_CAMPOS_NUEVOS",
+                      "Sus campos ya existían en la hoja base: no cambia el cálculo.", right_measures)
 
     result.master = base.reset_index(drop=True)
     return result
