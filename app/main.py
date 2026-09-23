@@ -1,17 +1,4 @@
-"""GENESIS CORE B2B - API.
-
-Endpoints (todos requieren X-API-Key salvo /health, /ready y /admin, que usa X-Admin-Key):
-  GET    /health, /ready
-  POST   /api/v1/admin/tenants                       crea un cliente y su primera clave
-  POST   /api/v1/admin/tenants/{id}/keys             emite otra clave (rotación)
-  POST   /api/v1/admin/keys/{key_id}/revoke          revoca una clave
-  GET    /api/v1/me                                  cliente actual y configuración
-  PUT    /api/v1/config                              umbrales del cliente (margen mínimo, IVA...)
-  POST   /api/v1/data-understanding                  analiza un archivo y propone el mapeo
-  POST   /api/v1/audits                              ejecuta la auditoría económica
-  GET    /api/v1/audits, /audits/{id}, /audits/{id}/export, DELETE /audits/{id}
-  GET    /api/v1/tasks, PATCH /api/v1/tasks/{id}, GET /api/v1/tasks/summary
-"""
+"""GENESIS CORE B2B - API."""
 from __future__ import annotations
 
 import datetime as dt
@@ -34,7 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import ENGINE_VERSION, get_settings
 from .core.ingestion import read_workbook
-from .core.model import CANONICAL_IDS
+from .core.model import CANONICAL_IDS, normalize_canonical
 from .core.pipeline import run_pipeline
 from .core.semantic import GenesisDataUnderstanding, sheet_signature
 from .core.serialize import clean
@@ -151,9 +138,14 @@ def parse_mapping(raw: str) -> dict:
             raise ApiError(400, "MAPEO_INVALIDO", f"El mapeo de la hoja '{sheet}' no es válido.")
         out[str(sheet)] = {}
         for col, canonical in cols.items():
+            original = canonical
+            canonical = normalize_canonical(canonical)
+            if original != canonical:
+                log.warning("DBG ALIAS: '%s' traducido a '%s'", original, canonical)
             if not isinstance(canonical, str) or canonical not in allowed:
                 raise ApiError(422, "CAMPO_INVALIDO", f"'{canonical}' no es un campo válido del modelo.")
             out[str(sheet)][str(col)] = canonical
+    log.warning("DBG MAPPING PARSED: %s", json.dumps(out, ensure_ascii=False)[:2000])
     return out
 
 
@@ -212,7 +204,6 @@ def audit_payload(db: Session, audit: AuditRecord, cases_limit: Optional[int] = 
 
 
 def remember_mapping(db: Session, tenant_id: str, mapping: dict, dfs: dict) -> None:
-    """Guarda las decisiones confirmadas para que el próximo archivo con el mismo formato entre sin preguntas."""
     for sheet, scoped in mapping.items():
         df = dfs.get(sheet)
         if df is None:
@@ -245,7 +236,7 @@ def ready(db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Administración (clave de servidor)
+# Administración
 # ---------------------------------------------------------------------------
 class TenantCreate(BaseModel):
     tenant_id: str = Field(..., pattern=r"^[a-z0-9][a-z0-9_-]{2,40}$")
@@ -379,18 +370,12 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...),
     for f in result.get("findings", []):
         accion = f.get("accion") or {}
         finding_row = Finding(
-            tenant_id=tenant_id,
-            audit_id=audit.id,
-            tipo=f.get("tipo", "OBSERVACION"),
-            prioridad=f.get("prioridad", 1),
-            severidad=f.get("severidad", "BAJA"),
-            titulo=f.get("titulo", "Hallazgo"),
-            causa=f.get("causa", "Causa no especificada"),
-            impacto=f.get("impacto", {}),
-            evidencia=f.get("evidencia", {}),
-            accion=accion,
-            vehiculos=f.get("vehiculos_afectados", []),
-            casos=f.get("casos", []),
+            tenant_id=tenant_id, audit_id=audit.id,
+            tipo=f.get("tipo", "OBSERVACION"), prioridad=f.get("prioridad", 1),
+            severidad=f.get("severidad", "BAJA"), titulo=f.get("titulo", "Hallazgo"),
+            causa=f.get("causa", "Causa no especificada"), impacto=f.get("impacto", {}),
+            evidencia=f.get("evidencia", {}), accion=accion,
+            vehiculos=f.get("vehiculos_afectados", []), casos=f.get("casos", []),
             casos_total=f.get("casos_total", 0),
         )
         db.add(finding_row)
@@ -399,15 +384,12 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...),
         if accion and accion.get("accion"):
             imp = f.get("impacto") or {}
             db.add(ActionTask(
-                tenant_id=tenant_id,
-                audit_id=audit.id,
-                finding_id=finding_row.id,
+                tenant_id=tenant_id, audit_id=audit.id, finding_id=finding_row.id,
                 department=accion.get("departamento", "General"),
                 title=f.get("titulo", "Acción recomendada"),
                 description=accion.get("accion", ""),
                 financial_impact=float(imp.get("impacto_directo", 0.0)),
-                urgency=accion.get("urgencia", "MEDIA"),
-                status="PENDIENTE",
+                urgency=accion.get("urgencia", "MEDIA"), status="PENDIENTE",
             ))
 
     if estado != "BLOQUEADA":
@@ -458,7 +440,6 @@ def export_audit(audit_id: int, tenant_id: str = Depends(heavy_tenant), db: Sess
 
 @app.delete("/api/v1/audits/{audit_id}")
 def delete_audit(audit_id: int, tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
-    """Derecho de supresión: elimina la auditoría y todo lo derivado de ella."""
     audit = _get_audit(db, tenant_id, audit_id)
     db.query(ActionTask).filter(ActionTask.audit_id == audit.id, ActionTask.tenant_id == tenant_id).delete()
     db.query(Finding).filter(Finding.audit_id == audit.id, Finding.tenant_id == tenant_id).delete()
@@ -501,24 +482,16 @@ def update_task(task_id: int, body: TaskUpdate, tenant_id: str = Depends(get_ten
     if body.status is not None and body.status != task.status:
         old_status = task.status
         task.status = body.status
-
-        # Transición HACIA "RESUELTA": sellamos fecha y monto
         if body.status == "RESUELTA" and old_status != "RESUELTA":
             task.resolved_at = utcnow()
-            task.recovered_amount = (
-                body.recovered_amount
-                if body.recovered_amount is not None
-                else task.financial_impact
-            )
-        # Transición FUERA de "RESUELTA": limpiamos la recuperación
+            task.recovered_amount = (body.recovered_amount if body.recovered_amount is not None
+                                     else task.financial_impact)
         elif body.status != "RESUELTA" and old_status == "RESUELTA":
             task.resolved_at = None
             task.recovered_amount = None
 
-    # Permitir ajustar el monto recuperado sin cambiar el estado
     if body.recovered_amount is not None and task.status == "RESUELTA":
         task.recovered_amount = body.recovered_amount
-
     if body.comment is not None:
         task.comment = body.comment
 
@@ -529,13 +502,6 @@ def update_task(task_id: int, body: TaskUpdate, tenant_id: str = Depends(get_ten
 @app.get("/api/v1/tasks/summary")
 def tasks_summary(audit_id: Optional[int] = Query(None),
                   tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
-    """Resumen económico del portafolio de tareas.
-
-    - en_riesgo:    PENDIENTE  (nadie lo ha tocado aún)
-    - en_gestion:   EN_PROCESO (alguien trabaja en ello)
-    - recuperado:   RESUELTA   (suma de recovered_amount, no de financial_impact)
-    - descartado:   DESCARTADA (no aplicaba o era falso positivo)
-    """
     q = db.query(ActionTask).filter(ActionTask.tenant_id == tenant_id)
     if audit_id is not None:
         q = q.filter(ActionTask.audit_id == audit_id)
@@ -577,11 +543,8 @@ def tasks_summary(audit_id: Optional[int] = Query(None),
         "descartado": _sum(descartadas, "financial_impact"),
         "total_identificado": _sum(rows, "financial_impact"),
         "tareas": {
-            "totales": len(rows),
-            "pendientes": len(pendientes),
-            "en_proceso": len(en_proceso),
-            "resueltas": len(resueltas),
-            "descartadas": len(descartadas),
+            "totales": len(rows), "pendientes": len(pendientes), "en_proceso": len(en_proceso),
+            "resueltas": len(resueltas), "descartadas": len(descartadas),
         },
         "por_departamento": por_departamento,
     }
