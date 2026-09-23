@@ -149,7 +149,7 @@ class GenesisDataUnderstanding:
             samples = _samples(df[col])
 
             if remembered and col in remembered:
-                canonical = normalize_canonical(remembered[col])   # ← NUEVO: traduce alias
+                canonical = normalize_canonical(remembered[col])
                 if canonical in CANONICAL_IDS:
                     analysis["fields_mapping"][col] = {"canonical": canonical, "confidence": 1.0,
                                                        "detected_type": actual, "source": "memoria",
