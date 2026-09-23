@@ -203,9 +203,6 @@ TAXONOMY: dict[str, FieldDef] = {
 # ---------------------------------------------------------------------------
 # 4. CAPA DE COMPATIBILIDAD CON EL CÓDIGO EXISTENTE
 # ---------------------------------------------------------------------------
-# Todo el código previo (merge.py, quality.py, engine.py, semantic.py) seguirá
-# funcionando de forma transparente sin modificar sus importaciones.
-
 CANONICAL_IDS: list[str] = list(TAXONOMY.keys())
 
 KEYS: list[str] = [k for k, v in TAXONOMY.items() if v.role in (FieldRole.PRIMARY_KEY, FieldRole.FOREIGN_KEY)]
@@ -224,7 +221,6 @@ VOLUME_COLUMNS: list[str] = ["VOLUME_GAL", "VOLUME_LTS"]
 
 LABELS: dict[str, str] = {k: v.label for k, v in TAXONOMY.items()}
 
-# Diccionario consumido por GenesisDataUnderstanding (semantic.py)
 FIELDS: dict[str, dict] = {
     k: {
         "label": v.label,
@@ -237,16 +233,20 @@ FIELDS: dict[str, dict] = {
 }
 
 LITROS_POR_GALON: float = 3.78541
+
+
 # ---------------------------------------------------------------------------
 # 5. COMPATIBILIDAD ENTRE VERSIONES (v1.1 → v1.2)
 # ---------------------------------------------------------------------------
 # Cuando renombramos un campo canónico, los mapeos guardados en memoria y el
 # frontend siguen enviando el nombre viejo. Este diccionario traduce sin romper.
 CANONICAL_ALIASES: dict[str, str] = {
-    "COST_TOLL": "COST_TOLLS",
+    "COST_TOLL": "COST_TOLLS",   # v1.1 lo llamaba COST_TOLL
 }
 
+
 def normalize_canonical(name: str) -> str:
+    """Traduce nombres antiguos al nombre canónico actual de v1.2."""
     if not isinstance(name, str):
         return name
     return CANONICAL_ALIASES.get(name, name)
