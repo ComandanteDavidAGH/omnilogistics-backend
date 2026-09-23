@@ -10,7 +10,7 @@ Endpoints (todos requieren X-API-Key salvo /health, /ready y /admin, que usa X-A
   POST   /api/v1/data-understanding                  analiza un archivo y propone el mapeo
   POST   /api/v1/audits                              ejecuta la auditoría económica
   GET    /api/v1/audits, /audits/{id}, /audits/{id}/export, DELETE /audits/{id}
-  GET    /api/v1/tasks, PATCH /api/v1/tasks/{id}
+  GET    /api/v1/tasks, PATCH /api/v1/tasks/{id}, GET /api/v1/tasks/summary
 """
 from __future__ import annotations
 
@@ -187,10 +187,14 @@ def finding_dict(f: Finding, cases_limit: Optional[int]) -> dict:
 
 
 def task_dict(t: ActionTask) -> dict:
-    return {"id": t.id, "audit_id": t.audit_id, "finding_id": t.finding_id, "department": t.department,
-            "title": t.title, "description": t.description, "financial_impact": t.financial_impact,
-            "urgency": t.urgency, "status": t.status, "comment": t.comment,
-            "created_at": _iso(t.created_at), "updated_at": _iso(t.updated_at)}
+    return {
+        "id": t.id, "audit_id": t.audit_id, "finding_id": t.finding_id, "department": t.department,
+        "title": t.title, "description": t.description, "financial_impact": t.financial_impact,
+        "urgency": t.urgency, "status": t.status, "comment": t.comment,
+        "resolved_at": _iso(t.resolved_at),
+        "recovered_amount": t.recovered_amount,
+        "created_at": _iso(t.created_at), "updated_at": _iso(t.updated_at),
+    }
 
 
 def audit_payload(db: Session, audit: AuditRecord, cases_limit: Optional[int] = 20) -> dict:
@@ -208,6 +212,7 @@ def audit_payload(db: Session, audit: AuditRecord, cases_limit: Optional[int] = 
 
 
 def remember_mapping(db: Session, tenant_id: str, mapping: dict, dfs: dict) -> None:
+    """Guarda las decisiones confirmadas para que el próximo archivo con el mismo formato entre sin preguntas."""
     for sheet, scoped in mapping.items():
         df = dfs.get(sheet)
         if df is None:
@@ -334,38 +339,43 @@ def data_understanding(file: UploadFile = File(...), tenant_id: str = Depends(he
 
 
 @app.post("/api/v1/audits")
-def create_audit(file: UploadFile = File(...), mapping: str = Form(...), forzar: bool = Query(False),
+def create_audit(file: UploadFile = File(...), mapping: str = Form(...),
                  tenant_id: str = Depends(heavy_tenant), db: Session = Depends(get_db)):
     filename, data = read_upload(file)
     file_sha = _sha(data)
     dfs = read_workbook(filename, data, settings)
     parsed_mapping = parse_mapping(mapping)
     config = config_to_dict(get_or_create_config(db, tenant_id))
+    mapping_sha = _json_sha(parsed_mapping)
+    config_sha = _json_sha(config)
 
-    remember_mapping(db, tenant_id, parsed_mapping, dfs)
-    result = run_pipeline(dfs, parsed_mapping, config)
-
+    result = clean(run_pipeline(dfs, parsed_mapping, config))
     calidad = result.get("calidad") or {}
     gate_level = calidad.get("nivelConfianza", "DESCONOCIDO")
+    estado = result.get("estado", "OK")
 
     audit = AuditRecord(
         tenant_id=tenant_id,
-        filename=filename,
+        filename=filename[:255],
         file_sha256=file_sha,
+        mapping_sha256=mapping_sha,
+        config_sha256=config_sha,
+        mapping=parsed_mapping,
         engine_version=ENGINE_VERSION,
-        estado=result.get("estado", "OK"),
+        estado=estado,
         quality_report=calidad,
+        quality_score=calidad.get("data_quality_score"),
+        analytical_confidence=calidad.get("analytical_confidence"),
         gate_level=gate_level,
         financial_results=result.get("financials"),
         warnings=result.get("advertencias", []),
         monthly=result.get("monthly", []),
         merge_report=result.get("merge_report", {}),
-        config_snapshot=config
+        config_snapshot=config,
     )
     db.add(audit)
     db.flush()
 
-    # Guardar hallazgos de forma limpia y defensiva (previene KeyError)
     for f in result.get("findings", []):
         accion = f.get("accion") or {}
         finding_row = Finding(
@@ -381,14 +391,14 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...), forzar:
             accion=accion,
             vehiculos=f.get("vehiculos_afectados", []),
             casos=f.get("casos", []),
-            casos_total=f.get("casos_total", 0)
+            casos_total=f.get("casos_total", 0),
         )
         db.add(finding_row)
         db.flush()
 
         if accion and accion.get("accion"):
             imp = f.get("impacto") or {}
-            task_row = ActionTask(
+            db.add(ActionTask(
                 tenant_id=tenant_id,
                 audit_id=audit.id,
                 finding_id=finding_row.id,
@@ -397,13 +407,17 @@ def create_audit(file: UploadFile = File(...), mapping: str = Form(...), forzar:
                 description=accion.get("accion", ""),
                 financial_impact=float(imp.get("impacto_directo", 0.0)),
                 urgency=accion.get("urgencia", "MEDIA"),
-                status="PENDIENTE"
-            )
-            db.add(task_row)
+                status="PENDIENTE",
+            ))
+
+    if estado != "BLOQUEADA":
+        remember_mapping(db, tenant_id, parsed_mapping, dfs)
 
     db.commit()
     db.refresh(audit)
-    return clean(audit_payload(db, audit))
+    payload = audit_payload(db, audit)
+    payload["reutilizado"] = False
+    return clean(payload)
 
 
 def _get_audit(db: Session, tenant_id: str, audit_id: int) -> AuditRecord:
@@ -444,6 +458,7 @@ def export_audit(audit_id: int, tenant_id: str = Depends(heavy_tenant), db: Sess
 
 @app.delete("/api/v1/audits/{audit_id}")
 def delete_audit(audit_id: int, tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
+    """Derecho de supresión: elimina la auditoría y todo lo derivado de ella."""
     audit = _get_audit(db, tenant_id, audit_id)
     db.query(ActionTask).filter(ActionTask.audit_id == audit.id, ActionTask.tenant_id == tenant_id).delete()
     db.query(Finding).filter(Finding.audit_id == audit.id, Finding.tenant_id == tenant_id).delete()
@@ -474,6 +489,7 @@ def list_tasks(status: Optional[str] = Query(None), audit_id: Optional[int] = Qu
 class TaskUpdate(BaseModel):
     status: Optional[Literal["PENDIENTE", "EN_PROCESO", "RESUELTA", "DESCARTADA"]] = None
     comment: Optional[str] = Field(None, max_length=2000)
+    recovered_amount: Optional[float] = Field(None, ge=0)
 
 
 @app.patch("/api/v1/tasks/{task_id}")
@@ -481,9 +497,91 @@ def update_task(task_id: int, body: TaskUpdate, tenant_id: str = Depends(get_ten
     task = db.query(ActionTask).filter(ActionTask.id == task_id, ActionTask.tenant_id == tenant_id).first()
     if task is None:
         raise ApiError(404, "TAREA_NO_ENCONTRADA", "No existe esa tarea.")
-    if body.status is not None:
+
+    if body.status is not None and body.status != task.status:
+        old_status = task.status
         task.status = body.status
+
+        # Transición HACIA "RESUELTA": sellamos fecha y monto
+        if body.status == "RESUELTA" and old_status != "RESUELTA":
+            task.resolved_at = utcnow()
+            task.recovered_amount = (
+                body.recovered_amount
+                if body.recovered_amount is not None
+                else task.financial_impact
+            )
+        # Transición FUERA de "RESUELTA": limpiamos la recuperación
+        elif body.status != "RESUELTA" and old_status == "RESUELTA":
+            task.resolved_at = None
+            task.recovered_amount = None
+
+    # Permitir ajustar el monto recuperado sin cambiar el estado
+    if body.recovered_amount is not None and task.status == "RESUELTA":
+        task.recovered_amount = body.recovered_amount
+
     if body.comment is not None:
         task.comment = body.comment
+
     db.commit()
     return task_dict(task)
+
+
+@app.get("/api/v1/tasks/summary")
+def tasks_summary(audit_id: Optional[int] = Query(None),
+                  tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
+    """Resumen económico del portafolio de tareas.
+
+    - en_riesgo:    PENDIENTE  (nadie lo ha tocado aún)
+    - en_gestion:   EN_PROCESO (alguien trabaja en ello)
+    - recuperado:   RESUELTA   (suma de recovered_amount, no de financial_impact)
+    - descartado:   DESCARTADA (no aplicaba o era falso positivo)
+    """
+    q = db.query(ActionTask).filter(ActionTask.tenant_id == tenant_id)
+    if audit_id is not None:
+        q = q.filter(ActionTask.audit_id == audit_id)
+    rows = q.all()
+
+    def _by(status: str) -> list:
+        return [t for t in rows if t.status == status]
+
+    pendientes = _by("PENDIENTE")
+    en_proceso = _by("EN_PROCESO")
+    resueltas = _by("RESUELTA")
+    descartadas = _by("DESCARTADA")
+
+    def _sum(items, attr) -> float:
+        return round(sum((getattr(t, attr) or 0) for t in items), 2)
+
+    por_departamento: dict = {}
+    for t in rows:
+        d = por_departamento.setdefault(t.department or "Sin asignar", {
+            "total": 0, "recuperado": 0, "pendiente": 0, "tareas": 0, "resueltas": 0,
+        })
+        d["tareas"] += 1
+        d["total"] += t.financial_impact or 0
+        if t.status == "RESUELTA":
+            d["recuperado"] += t.recovered_amount or 0
+            d["resueltas"] += 1
+        elif t.status in ("PENDIENTE", "EN_PROCESO"):
+            d["pendiente"] += t.financial_impact or 0
+
+    for d in por_departamento.values():
+        d["total"] = round(d["total"], 2)
+        d["recuperado"] = round(d["recuperado"], 2)
+        d["pendiente"] = round(d["pendiente"], 2)
+
+    return {
+        "en_riesgo": _sum(pendientes, "financial_impact"),
+        "en_gestion": _sum(en_proceso, "financial_impact"),
+        "recuperado": _sum(resueltas, "recovered_amount"),
+        "descartado": _sum(descartadas, "financial_impact"),
+        "total_identificado": _sum(rows, "financial_impact"),
+        "tareas": {
+            "totales": len(rows),
+            "pendientes": len(pendientes),
+            "en_proceso": len(en_proceso),
+            "resueltas": len(resueltas),
+            "descartadas": len(descartadas),
+        },
+        "por_departamento": por_departamento,
+    }
