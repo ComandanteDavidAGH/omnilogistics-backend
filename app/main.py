@@ -226,7 +226,7 @@ def remember_mapping(db: Session, tenant_id: str, mapping: dict, dfs: dict) -> N
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": ENGINE_VERSION, "timestamp": dt.datetime.now(dt.timezone.utc).isoformat()}
+    return {"status": "health-CEBO-2026", "version": ENGINE_VERSION + "-TEST", "timestamp": dt.datetime.now(dt.timezone.utc).isoformat()}
 
 
 @app.get("/ready")
