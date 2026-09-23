@@ -1,17 +1,4 @@
-"""GENESIS CORE B2B - API.
-
-Endpoints (todos requieren X-API-Key salvo /health, /ready y /admin, que usa X-Admin-Key):
-  GET    /health, /ready
-  POST   /api/v1/admin/tenants                       crea un cliente y su primera clave
-  POST   /api/v1/admin/tenants/{id}/keys             emite otra clave (rotación)
-  POST   /api/v1/admin/keys/{key_id}/revoke          revoca una clave
-  GET    /api/v1/me                                  cliente actual y configuración
-  PUT    /api/v1/config                              umbrales del cliente (margen mínimo, IVA...)
-  POST   /api/v1/data-understanding                  analiza un archivo y propone el mapeo
-  POST   /api/v1/audits                              ejecuta la auditoría económica
-  GET    /api/v1/audits, /audits/{id}, /audits/{id}/export, DELETE /audits/{id}
-  GET    /api/v1/tasks, PATCH /api/v1/tasks/{id}
-"""
+"""GENESIS CORE B2B - API."""
 from __future__ import annotations
 
 import datetime as dt
@@ -72,7 +59,7 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Middleware y manejo de errores (sin filtrar detalles internos al cliente)
+# Middleware y manejo de errores
 # ---------------------------------------------------------------------------
 @app.middleware("http")
 async def request_context(request: Request, call_next):
@@ -151,10 +138,14 @@ def parse_mapping(raw: str) -> dict:
             raise ApiError(400, "MAPEO_INVALIDO", f"El mapeo de la hoja '{sheet}' no es válido.")
         out[str(sheet)] = {}
         for col, canonical in cols.items():
-            canonical = normalize_canonical(canonical)          # ← NUEVO: traduce alias
+            original = canonical
+            canonical = normalize_canonical(canonical)
+            if original != canonical:
+                log.warning("DBG ALIAS: '%s' traducido a '%s'", original, canonical)
             if not isinstance(canonical, str) or canonical not in allowed:
                 raise ApiError(422, "CAMPO_INVALIDO", f"'{canonical}' no es un campo válido del modelo.")
             out[str(sheet)][str(col)] = canonical
+    log.warning("DBG MAPPING PARSED: %s", json.dumps(out, ensure_ascii=False)[:2000])
     return out
 
 
@@ -188,10 +179,14 @@ def finding_dict(f: Finding, cases_limit: Optional[int]) -> dict:
 
 
 def task_dict(t: ActionTask) -> dict:
-    return {"id": t.id, "audit_id": t.audit_id, "finding_id": t.finding_id, "department": t.department,
-            "title": t.title, "description": t.description, "financial_impact": t.financial_impact,
-            "urgency": t.urgency, "status": t.status, "comment": t.comment,
-            "created_at": _iso(t.created_at), "updated_at": _iso(t.updated_at)}
+    return {
+        "id": t.id, "audit_id": t.audit_id, "finding_id": t.finding_id, "department": t.department,
+        "title": t.title, "description": t.description, "financial_impact": t.financial_impact,
+        "urgency": t.urgency, "status": t.status, "comment": t.comment,
+        "resolved_at": _iso(t.resolved_at),
+        "recovered_amount": t.recovered_amount,
+        "created_at": _iso(t.created_at), "updated_at": _iso(t.updated_at),
+    }
 
 
 def audit_payload(db: Session, audit: AuditRecord, cases_limit: Optional[int] = 20) -> dict:
@@ -209,7 +204,6 @@ def audit_payload(db: Session, audit: AuditRecord, cases_limit: Optional[int] = 
 
 
 def remember_mapping(db: Session, tenant_id: str, mapping: dict, dfs: dict) -> None:
-    """Guarda las decisiones confirmadas para que el próximo archivo con el mismo formato entre sin preguntas."""
     for sheet, scoped in mapping.items():
         df = dfs.get(sheet)
         if df is None:
@@ -232,7 +226,7 @@ def remember_mapping(db: Session, tenant_id: str, mapping: dict, dfs: dict) -> N
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"status": "CEBO_ATRAPADO", "mensaje": "EL BACKEND SI ME ESTA ESCUCHANDO", "version": ENGINE_VERSION}
+    return {"status": "healthy", "version": ENGINE_VERSION, "timestamp": dt.datetime.now(dt.timezone.utc).isoformat()}
 
 
 @app.get("/ready")
@@ -242,7 +236,7 @@ def ready(db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Administración (clave de servidor)
+# Administración
 # ---------------------------------------------------------------------------
 class TenantCreate(BaseModel):
     tenant_id: str = Field(..., pattern=r"^[a-z0-9][a-z0-9_-]{2,40}$")
@@ -336,44 +330,73 @@ def data_understanding(file: UploadFile = File(...), tenant_id: str = Depends(he
 
 
 @app.post("/api/v1/audits")
-def create_audit(file: UploadFile = File(...), mapping: str = Form(...), tenant_id: str = Depends(heavy_tenant),
-                 db: Session = Depends(get_db)):
-    name, data = read_upload(file)
-    mapping_dict = parse_mapping(mapping)
+def create_audit(file: UploadFile = File(...), mapping: str = Form(...),
+                 tenant_id: str = Depends(heavy_tenant), db: Session = Depends(get_db)):
+    filename, data = read_upload(file)
+    file_sha = _sha(data)
+    dfs = read_workbook(filename, data, settings)
+    parsed_mapping = parse_mapping(mapping)
     config = config_to_dict(get_or_create_config(db, tenant_id))
-    file_hash, mapping_hash, config_hash = _sha(data), _json_sha(mapping_dict), _json_sha(config)
+    mapping_sha = _json_sha(parsed_mapping)
+    config_sha = _json_sha(config)
 
-    # Despliegue definitivo sin cache
+    result = clean(run_pipeline(dfs, parsed_mapping, config))
+    calidad = result.get("calidad") or {}
+    gate_level = calidad.get("nivelConfianza", "DESCONOCIDO")
+    estado = result.get("estado", "OK")
 
-    dfs = read_workbook(name, data, settings)
-    outcome = clean(run_pipeline(dfs, mapping_dict, config))
-
-    calidad = outcome["calidad"]
     audit = AuditRecord(
-        tenant_id=tenant_id, filename=name[:255], file_sha256=file_hash, mapping_sha256=mapping_hash,
-        config_sha256=config_hash, engine_version=ENGINE_VERSION, estado=outcome["estado"],
-        gate_level=calidad["nivelConfianza"], quality_score=calidad["data_quality_score"],
-        analytical_confidence=calidad["analytical_confidence"], mapping=mapping_dict, config_snapshot=config,
-        quality_report=calidad, financial_results=outcome["financials"], warnings=outcome["advertencias"],
-        monthly=outcome["monthly"], merge_report=outcome["merge_report"])
+        tenant_id=tenant_id,
+        filename=filename[:255],
+        file_sha256=file_sha,
+        mapping_sha256=mapping_sha,
+        config_sha256=config_sha,
+        mapping=parsed_mapping,
+        engine_version=ENGINE_VERSION,
+        estado=estado,
+        quality_report=calidad,
+        quality_score=calidad.get("data_quality_score"),
+        analytical_confidence=calidad.get("analytical_confidence"),
+        gate_level=gate_level,
+        financial_results=result.get("financials"),
+        warnings=result.get("advertencias", []),
+        monthly=result.get("monthly", []),
+        merge_report=result.get("merge_report", {}),
+        config_snapshot=config,
+    )
     db.add(audit)
     db.flush()
 
-    for f in outcome["findings"]:
-        row = Finding(
-            audit_id=audit.id, tenant_id=tenant_id, tipo=f["tipo"], prioridad=f["prioridad"], severidad=f["severidad"],
-            titulo=f["titulo"], causa=f["causa"], impacto=f["impacto"], evidencia=f["evidencia"], accion=f["accion"],
-            vehiculos=f["vehiculos_afectados"], casos=f["casos"], casos_total=f["casos_total"])
-        db.add(row)
+    for f in result.get("findings", []):
+        accion = f.get("accion") or {}
+        finding_row = Finding(
+            tenant_id=tenant_id, audit_id=audit.id,
+            tipo=f.get("tipo", "OBSERVACION"), prioridad=f.get("prioridad", 1),
+            severidad=f.get("severidad", "BAJA"), titulo=f.get("titulo", "Hallazgo"),
+            causa=f.get("causa", "Causa no especificada"), impacto=f.get("impacto", {}),
+            evidencia=f.get("evidencia", {}), accion=accion,
+            vehiculos=f.get("vehiculos_afectados", []), casos=f.get("casos", []),
+            casos_total=f.get("casos_total", 0),
+        )
+        db.add(finding_row)
         db.flush()
-        db.add(ActionTask(
-            tenant_id=tenant_id, audit_id=audit.id, finding_id=row.id, department=f["accion"]["departamento"],
-            title=f["titulo"], description=f["accion"]["accion"], financial_impact=f["impacto"]["impacto_directo"],
-            urgency=f["accion"]["urgencia"]))
 
-    if outcome["estado"] != "BLOQUEADA":
-        remember_mapping(db, tenant_id, mapping_dict, dfs)
+        if accion and accion.get("accion"):
+            imp = f.get("impacto") or {}
+            db.add(ActionTask(
+                tenant_id=tenant_id, audit_id=audit.id, finding_id=finding_row.id,
+                department=accion.get("departamento", "General"),
+                title=f.get("titulo", "Acción recomendada"),
+                description=accion.get("accion", ""),
+                financial_impact=float(imp.get("impacto_directo", 0.0)),
+                urgency=accion.get("urgencia", "MEDIA"), status="PENDIENTE",
+            ))
+
+    if estado != "BLOQUEADA":
+        remember_mapping(db, tenant_id, parsed_mapping, dfs)
+
     db.commit()
+    db.refresh(audit)
     payload = audit_payload(db, audit)
     payload["reutilizado"] = False
     return clean(payload)
@@ -417,7 +440,6 @@ def export_audit(audit_id: int, tenant_id: str = Depends(heavy_tenant), db: Sess
 
 @app.delete("/api/v1/audits/{audit_id}")
 def delete_audit(audit_id: int, tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
-    """Derecho de supresión: elimina la auditoría y todo lo derivado de ella."""
     audit = _get_audit(db, tenant_id, audit_id)
     db.query(ActionTask).filter(ActionTask.audit_id == audit.id, ActionTask.tenant_id == tenant_id).delete()
     db.query(Finding).filter(Finding.audit_id == audit.id, Finding.tenant_id == tenant_id).delete()
@@ -448,6 +470,7 @@ def list_tasks(status: Optional[str] = Query(None), audit_id: Optional[int] = Qu
 class TaskUpdate(BaseModel):
     status: Optional[Literal["PENDIENTE", "EN_PROCESO", "RESUELTA", "DESCARTADA"]] = None
     comment: Optional[str] = Field(None, max_length=2000)
+    recovered_amount: Optional[float] = Field(None, ge=0)
 
 
 @app.patch("/api/v1/tasks/{task_id}")
@@ -455,9 +478,73 @@ def update_task(task_id: int, body: TaskUpdate, tenant_id: str = Depends(get_ten
     task = db.query(ActionTask).filter(ActionTask.id == task_id, ActionTask.tenant_id == tenant_id).first()
     if task is None:
         raise ApiError(404, "TAREA_NO_ENCONTRADA", "No existe esa tarea.")
-    if body.status is not None:
+
+    if body.status is not None and body.status != task.status:
+        old_status = task.status
         task.status = body.status
+        if body.status == "RESUELTA" and old_status != "RESUELTA":
+            task.resolved_at = utcnow()
+            task.recovered_amount = (body.recovered_amount if body.recovered_amount is not None
+                                     else task.financial_impact)
+        elif body.status != "RESUELTA" and old_status == "RESUELTA":
+            task.resolved_at = None
+            task.recovered_amount = None
+
+    if body.recovered_amount is not None and task.status == "RESUELTA":
+        task.recovered_amount = body.recovered_amount
     if body.comment is not None:
         task.comment = body.comment
+
     db.commit()
     return task_dict(task)
+
+
+@app.get("/api/v1/tasks/summary")
+def tasks_summary(audit_id: Optional[int] = Query(None),
+                  tenant_id: str = Depends(get_tenant_id), db: Session = Depends(get_db)):
+    q = db.query(ActionTask).filter(ActionTask.tenant_id == tenant_id)
+    if audit_id is not None:
+        q = q.filter(ActionTask.audit_id == audit_id)
+    rows = q.all()
+
+    def _by(status: str) -> list:
+        return [t for t in rows if t.status == status]
+
+    pendientes = _by("PENDIENTE")
+    en_proceso = _by("EN_PROCESO")
+    resueltas = _by("RESUELTA")
+    descartadas = _by("DESCARTADA")
+
+    def _sum(items, attr) -> float:
+        return round(sum((getattr(t, attr) or 0) for t in items), 2)
+
+    por_departamento: dict = {}
+    for t in rows:
+        d = por_departamento.setdefault(t.department or "Sin asignar", {
+            "total": 0, "recuperado": 0, "pendiente": 0, "tareas": 0, "resueltas": 0,
+        })
+        d["tareas"] += 1
+        d["total"] += t.financial_impact or 0
+        if t.status == "RESUELTA":
+            d["recuperado"] += t.recovered_amount or 0
+            d["resueltas"] += 1
+        elif t.status in ("PENDIENTE", "EN_PROCESO"):
+            d["pendiente"] += t.financial_impact or 0
+
+    for d in por_departamento.values():
+        d["total"] = round(d["total"], 2)
+        d["recuperado"] = round(d["recuperado"], 2)
+        d["pendiente"] = round(d["pendiente"], 2)
+
+    return {
+        "en_riesgo": _sum(pendientes, "financial_impact"),
+        "en_gestion": _sum(en_proceso, "financial_impact"),
+        "recuperado": _sum(resueltas, "recovered_amount"),
+        "descartado": _sum(descartadas, "financial_impact"),
+        "total_identificado": _sum(rows, "financial_impact"),
+        "tareas": {
+            "totales": len(rows), "pendientes": len(pendientes), "en_proceso": len(en_proceso),
+            "resueltas": len(resueltas), "descartadas": len(descartadas),
+        },
+        "por_departamento": por_departamento,
+    }
